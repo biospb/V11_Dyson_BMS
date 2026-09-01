@@ -47,6 +47,7 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
 #endif
 
 #define PACK_CAPACITY_UPPER_BOUND_UAH       (PACK_MAX_CAPACITY_MAH * 1200ul)  // 120% of nominal, in uAh
+#define PACK_CAPACITY_LOWER_BOUND_UAH       (PACK_MAX_CAPACITY_MAH *  300ul)  //  30% of nominal, in uAh
 
 // RTC standby wake timer: GCLK2 = ULP32K/32 (1024 Hz), RTC prescaler = DIV1024 → 1 Hz
 // N days = N * 86400 seconds × 1 tick/sec
@@ -270,9 +271,17 @@ void bms_interrupt_process(void)
       cc_uah /= 32768;
       eeprom_data.current_charge_level += cc_uah;
 
-      // Clamp charge level to valid range
-      if (eeprom_data.current_charge_level > eeprom_data.total_pack_capacity)
-        eeprom_data.current_charge_level = eeprom_data.total_pack_capacity;
+      /*
+       * Clamp to the physical upper bound, NOT to the learned capacity.
+       * Clamping to total_pack_capacity meant the level could never exceed
+       * the stored figure, so the learning step below - which assigns the
+       * level to the capacity - could only ever lower it. One bad cycle
+       * ratcheted the gauge down permanently with no path back.
+       * bms_get_soc_x100() already clamps the reported percentage at 100%,
+       * so a level briefly above the learned capacity mid-learn is harmless.
+       */
+      if (eeprom_data.current_charge_level > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH)
+        eeprom_data.current_charge_level = (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH;
       if (eeprom_data.current_charge_level < 0)
         eeprom_data.current_charge_level = 0;
     }
@@ -1618,17 +1627,30 @@ static void bms_handle_charging(void)
 
       if (eeprom_data.full_discharge_seen)
       {
-        // assign total capacity to currrent charge level if we ar eseen full charge
+        /*
+         * A full discharge-to-charge cycle was observed, so the coulomb count
+         * accumulated since empty IS the pack capacity - in either direction.
+         * This is the only path that may raise the figure, which is what stops
+         * a single bad cycle from being permanent.
+         */
         eeprom_data.total_pack_capacity = eeprom_data.current_charge_level;
         eeprom_data.full_discharge_seen = 0;
       }
       else
       {
-        // filtration of total_pack_capacity, slow decay only (never increase)
+        /*
+         * No full cycle to calibrate against, so only let the estimate decay
+         * towards the measured value, never jump up on partial-cycle noise.
+         */
         int32_t gap = eeprom_data.total_pack_capacity - eeprom_data.current_charge_level;
         if (gap > 0)
           eeprom_data.total_pack_capacity -= gap >> 3;
       }
+
+      /* Never learn an implausibly small pack either - a mid-charge fault or a
+         charger unplugged early would otherwise be taken as the real capacity. */
+      if (eeprom_data.total_pack_capacity < (int32_t)PACK_CAPACITY_LOWER_BOUND_UAH)
+        eeprom_data.total_pack_capacity = (int32_t)PACK_CAPACITY_LOWER_BOUND_UAH;
 
       // Clamp to upper bound
       if (eeprom_data.total_pack_capacity > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH)
