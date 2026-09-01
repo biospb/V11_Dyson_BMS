@@ -455,6 +455,11 @@ void bms_mainloop(void)
     dsn_prot_mainloop();
     bms_interrupt_process();
     bms_wdt_mainloop();
+    /* Drains one byte per call. Without it here the queue only moved inside
+       sw_timer_delay_ms(), so a state handler that returns promptly - INIT,
+       CHARGER_CONNECTED, CHARGER_UNPLUGGED - could leave its own log lines
+       sitting in the buffer until something else happened to block. */
+    serial_debug_process();
   }
 }
 
@@ -1496,7 +1501,14 @@ static void bms_handle_charger_connected_not_charging(void)
       serial_debug_send_message("BMS_STANDBY\r\n");
       leds_blink_leds_num(LEDS_NUM, 4, 100);
 
-      // goto sleep
+      /*
+       * NB TC0 is clocked from GCLK1, which does not run in standby, so the
+       * sw_timer tick stops here and every running sw_timer under-counts by
+       * however long standby lasted. Nothing currently depends on that - the
+       * timers that matter are restarted below or read as already elapsed,
+       * which is the safe direction - but any new timer used across this
+       * point needs restarting after the wake.
+       */
       system_set_sleepmode(SYSTEM_SLEEPMODE_STANDBY);
       system_sleep(); // WFI
 
