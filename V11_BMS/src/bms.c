@@ -46,7 +46,6 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
 #define BMS_PRINT(...)
 #endif
 
-#define ROUND(x) (((x) + 0.5))
 #define PACK_CAPACITY_UPPER_BOUND_UAH       (PACK_MAX_CAPACITY_MAH * 1200ul)  // 120% of nominal, in uAh
 
 // RTC standby wake timer: GCLK2 = ULP32K/32 (1024 Hz), RTC prescaler = DIV1024 → 1 Hz
@@ -259,7 +258,16 @@ uint16_t bms_get_soc_x100(void)
 
   if(total_pack_capacity > 0 && current_charge_level > 0)
   {
-    soc = (current_charge_level * (uint16_t)ROUND((100.0f * 100.0f) / 1024.0f)) / total_pack_capacity;
+    /*
+     * soc_x100 = level * 10000 / capacity, with capacity pre-scaled by >>10.
+     * The exact factor is 10000/1024 = 9.765625; ROUND() produced
+     * (uint16_t)(9.7656 + 0.5) = 10, a flat +2.4% over-read at full charge.
+     * 10000/1024 == 625/64 exactly, so shift the level down by 6 first and
+     * the whole thing stays integer and inside int32:
+     *   4.32e6 >> 6 = 67500, * 625 = 4.2e7, well under 2.1e9.
+     * The >>6 discards at most 63uAh of a 3.6Ah pack - 0.0015%.
+     */
+    soc = (uint16_t)(((current_charge_level >> 6) * 625) / total_pack_capacity);
     soc = (soc > 10000) ? 10000 : ((soc == 0) ? 100 : soc);
   }
 
