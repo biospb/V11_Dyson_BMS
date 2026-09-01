@@ -56,4 +56,56 @@
 // Trigger behaviour: 0 = momentary (hold to run), 1 = toggle (press to run/stop).
 #define TRIGGER_TOGGLE_MODE                 0
 
+//-----------------------------------------------------------------------------
+// Passive cell balancing (BQ7693 internal balance FETs)
+//-----------------------------------------------------------------------------
+// The BQ7693003 (bq76930) internal balance drivers are limited to I_CB = 5mA per
+// cell, and the bleed path runs through both external cell-input resistors
+// (Rc, spec'd 500ohm min / 1k typ for this part), so the real current is
+//     I = Vcell / (2*Rc + Rds_on)  ->  ~2mA @ Rc=1k, ~4mA @ Rc=500R
+// times the ~70% balancing duty cycle. Budget ~2-3mA average.
+// Near top of charge a cell moves ~1mV per 2.5mAh, so shifting a 10mV spread is
+// an ~8 hour job. Balancing is therefore a maintenance task that runs across
+// many dock sessions - it is NOT expected to converge within one charge.
+#define CELL_BALANCE_ENABLE                 1
+
+// Start bleeding a cell once it is this far above the lowest cell...
+#define CELL_BALANCE_START_MV               30      //mV
+// ...and stop that cell once it is back within this of the lowest (hysteresis).
+#define CELL_BALANCE_STOP_MV                10      //mV
+// Whole pack is considered balanced once max-min drops below this.
+#define CELL_BALANCE_TARGET_SPREAD_MV       15      //mV
+
+// Only balance near the top of charge, where cell voltage actually tracks SOC.
+// Gated on the HIGHEST cell so a weak cell cannot block balancing forever.
+#define CELL_BALANCE_MIN_CELL_MV            3900    //mV
+
+// A spread larger than this is a failing cell, not an imbalance. Bleeding the
+// healthy cells down to meet it would dump most of the pack as heat, so refuse.
+#define CELL_BALANCE_MAX_SPREAD_MV          300     //mV
+
+// Hard ceiling. If any cell reaches this, stop balancing and stop charging.
+// Must stay comfortably below CELL_OVERVOLTAGE_TRIP (4250mV).
+#define CELL_BALANCE_OV_GUARD_MV            4200    //mV
+
+// Balancing burns the imbalance off as heat inside the pack and runs unattended
+// for hours on the dock, so it honours the charge temperature ceiling as well.
+// Tracks MAX_PACK_CHARGE_TEMP by default; lower it if you want balancing to
+// back off earlier than charging does.
+#define CELL_BALANCE_MAX_TEMP               MAX_PACK_CHARGE_TEMP   //'C
+
+// How often the balancing decision is re-evaluated.
+#define CELL_BALANCE_PERIOD_MS              2000
+
+// Let cells relax this long after the charge FET opens before trusting the
+// measured spread - under charge, IR drop and surface charge dominate it.
+#define CELL_BALANCE_RELAX_MS               20000
+
+// LED indication while balancing. The two LEDs alternate left<->right, which is
+// the one gesture no other state uses - every other pattern in this firmware
+// (boot fade, charging breathe, fault blink-codes, standby blinks) drives both
+// LEDs in unison. Time each side is lit, and brightness in percent.
+#define CELL_BALANCE_LED_ALT_MS             500
+#define CELL_BALANCE_LED_DUTY               40
+
 #endif /* CONFIG_H_ */

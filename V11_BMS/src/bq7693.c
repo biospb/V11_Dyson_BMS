@@ -336,6 +336,207 @@ void bq7693_enter_sleep_mode(void)
   bq7693_write_register(SYS_CTRL1, 0x02);
 }
 
+//-----------------------------------------------------------------------------
+//  Passive cell balancing
+//-----------------------------------------------------------------------------
+#if CELL_BALANCE_ENABLE
+// Cells on this pack are wired to VC1..VC4, VC6, VC7 and VC10 (see the
+// cellsToRead[] map in bq7693_get_cell_voltages), so the balance channels are
+// CB1..CB4 in CELLBAL1 and CB6, CB7, CB10 in CELLBAL2.
+//
+// Datasheet constraint (SLUSBK2I 8.3.1.3.3): "The host controller must ensure
+// that no two adjacent cells are balanced simultaneously within each set of:
+// VC1-VC5, VC6-VC10, VC11-VC15." Doing so can push cell pins past their
+// absolute maximum ratings.
+//
+// cb_reg/cb_bit give the CELLBALn bit for each measured cell; cb_conflict is
+// the set of cells that must not bleed at the same time. Note cells 3 (CB4) and
+// 4 (CB6) sit in different registers - the datasheet rule does not formally
+// cover that pair - but VC5 is strapped to VC4 on this pack, so both bleed
+// currents would meet at one physical node. Treated as conflicting.
+
+static const uint8_t cb_reg[BQ7693_NUM_CELLS] =
+{
+  CELLBAL1, CELLBAL1, CELLBAL1, CELLBAL1,   // CB1  CB2  CB3  CB4
+  CELLBAL2, CELLBAL2, CELLBAL2              // CB6  CB7  CB10
+};
+
+static const uint8_t cb_bit[BQ7693_NUM_CELLS] =
+{
+  0, 1, 2, 3,     // CB1..CB4  -> CELLBAL1 bits 0..3
+  0, 1, 4         // CB6, CB7, CB10 -> CELLBAL2 bits 0, 1, 4
+};
+
+static const uint8_t cb_conflict[BQ7693_NUM_CELLS] =
+{
+  /* 0  CB1  */ (1u << 1),
+  /* 1  CB2  */ (1u << 0) | (1u << 2),
+  /* 2  CB3  */ (1u << 1) | (1u << 3),
+  /* 3  CB4  */ (1u << 2) | (1u << 4),
+  /* 4  CB6  */ (1u << 3) | (1u << 5),
+  /* 5  CB7  */ (1u << 4),
+  /* 6  CB10 */ 0
+};
+
+// Cells that were bleeding on the previous pass, for start/stop hysteresis.
+static uint8_t bq7693_balance_latch = 0;
+
+/**
+ * @brief Write both balance registers directly.
+ *
+ * @param cellbal1  CB5..CB1 in bits 4..0.
+ * @param cellbal2  CB10..CB6 in bits 4..0.
+ */
+void bq7693_set_balancing(uint8_t cellbal1, uint8_t cellbal2)
+{
+  bq7693_write_register(CELLBAL1, cellbal1 & 0x1F);
+  bq7693_write_register(CELLBAL2, cellbal2 & 0x1F);
+}
+
+/** @brief Turn every balance channel off and drop the hysteresis latch. */
+void bq7693_disable_balancing(void)
+{
+  bq7693_balance_latch = 0;
+  bq7693_set_balancing(0x00, 0x00);
+}
+
+/**
+ * @brief Re-evaluate which cells should be bleeding and program CELLBAL1/2.
+ *
+ * Reads the cell voltages, then bleeds every cell that sits above the pack
+ * minimum by more than CELL_BALANCE_START_MV, highest cell first, skipping any
+ * cell that conflicts with one already selected. The registers are rewritten on
+ * every call, which also re-arms balancing after the BQ7693 auto-clears
+ * CELLBAL1/2/3 (it does so whenever DEVICE_XREADY is set, and on entry to
+ * NORMAL mode from SHIP).
+ *
+ * Call no faster than the ADC update rate (250ms); CELL_BALANCE_PERIOD_MS is
+ * the intended cadence. Only meaningful with the charge FET off and the cells
+ * relaxed - under charge the measured spread is mostly IR drop.
+ *
+ * @param status  Filled in with the resulting decision. Must not be NULL.
+ */
+void bq7693_balance_update(bq7693_balance_status_t *status)
+{
+  uint16_t *v = bq7693_get_cell_voltages();
+  uint16_t  v_min = 0xFFFF;
+  uint16_t  v_max = 0;
+  uint8_t   max_cell = 0;
+  uint8_t   selected = 0;
+  uint8_t   reg1 = 0;
+  uint8_t   reg2 = 0;
+  uint8_t   n = 0;
+  int i;
+
+  for (i = 0; i < BQ7693_NUM_CELLS; ++i)
+  {
+    if (v[i] < v_min)
+      v_min = v[i];
+    if (v[i] > v_max)
+    {
+      v_max    = v[i];
+      max_cell = (uint8_t)i;
+    }
+  }
+
+  status->v_min_mv  = v_min;
+  status->v_max_mv  = v_max;
+  status->spread_mv = (uint16_t)(v_max - v_min);
+  status->max_cell  = max_cell;
+  status->cell_mask = 0;
+  status->num_cells = 0;
+
+  // --- guards, most severe first -------------------------------------------
+
+  // A cell has run away. Stop bleeding everything and let the caller cut charge.
+  if (v_max >= CELL_BALANCE_OV_GUARD_MV)
+  {
+    bq7693_disable_balancing();
+    status->state = BQ_BALANCE_OV;
+    return;
+  }
+
+  // Not near the top of charge yet - cell voltage does not track SOC well
+  // enough down here to balance on. Gated on the highest cell so that a single
+  // weak cell cannot lock balancing out forever.
+  if (v_max < CELL_BALANCE_MIN_CELL_MV)
+  {
+    bq7693_disable_balancing();
+    status->state = BQ_BALANCE_TOO_LOW;
+    return;
+  }
+
+  // One cell will not charge up to meet the others. This is a failing cell, not
+  // an imbalance: bleeding the other six down to reach it would dump most of the
+  // pack's energy as heat and achieve nothing. Refuse and report it.
+  if (status->spread_mv > CELL_BALANCE_MAX_SPREAD_MV)
+  {
+    bq7693_disable_balancing();
+    status->state = BQ_BALANCE_CELL_FAIL;
+    return;
+  }
+
+  // Close enough - done.
+  if (status->spread_mv <= CELL_BALANCE_TARGET_SPREAD_MV)
+  {
+    bq7693_disable_balancing();
+    status->state = BQ_BALANCE_IDLE;
+    return;
+  }
+
+  // --- selection: highest cell first, then next highest, honouring conflicts -
+  for (;;)
+  {
+    int      best   = -1;
+    uint16_t best_v = 0;
+
+    for (i = 0; i < BQ7693_NUM_CELLS; ++i)
+    {
+      uint16_t threshold;
+
+      if (selected & (1u << i))
+        continue;                       // already picked this pass
+
+      // Hysteresis: a cell already bleeding keeps going down to the tighter
+      // stop threshold, so cells do not chatter around the start threshold.
+      threshold = (bq7693_balance_latch & (1u << i)) ? CELL_BALANCE_STOP_MV
+                                                     : CELL_BALANCE_START_MV;
+
+      if ((uint16_t)(v[i] - v_min) <= threshold)
+        continue;                       // low enough, leave it alone
+
+      if (selected & cb_conflict[i])
+        continue;                       // adjacent to a cell already bleeding
+
+      if (best < 0 || v[i] > best_v)
+      {
+        best   = i;
+        best_v = v[i];
+      }
+    }
+
+    if (best < 0)
+      break;
+
+    selected |= (uint8_t)(1u << best);
+    ++n;
+
+    if (cb_reg[best] == CELLBAL1)
+      reg1 |= (uint8_t)(1u << cb_bit[best]);
+    else
+      reg2 |= (uint8_t)(1u << cb_bit[best]);
+  }
+
+  bq7693_balance_latch = selected;
+  bq7693_set_balancing(reg1, reg2);
+
+  status->cell_mask = selected;
+  status->num_cells = n;
+  status->state     = (n > 0) ? BQ_BALANCE_ACTIVE : BQ_BALANCE_IDLE;
+}
+
+#endif /* CELL_BALANCE_ENABLE */
+
 /**
  * @brief Read raw coulomb counter value from BQ7693.
  *

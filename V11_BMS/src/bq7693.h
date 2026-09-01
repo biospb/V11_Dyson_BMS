@@ -39,6 +39,40 @@ void bq7693_enter_sleep_mode(void);
 
 int16_t bq7693_read_cc(void);
 
+//-----------------------------------------------------------------------------
+// Passive cell balancing - compiled out entirely when CELL_BALANCE_ENABLE is 0
+//-----------------------------------------------------------------------------
+#define BQ7693_NUM_CELLS   7
+
+#if CELL_BALANCE_ENABLE
+
+typedef enum
+{
+  BQ_BALANCE_IDLE,       // spread already within target - nothing bleeding
+  BQ_BALANCE_ACTIVE,     // one or more cells bleeding
+  BQ_BALANCE_TOO_LOW,    // pack not near top of charge yet
+  BQ_BALANCE_CELL_FAIL,  // a cell will not come up - refuse to bleed the healthy ones
+  BQ_BALANCE_OV,         // a cell hit the OV guard - caller must stop charging
+  BQ_BALANCE_TOO_HOT,    // pack above CELL_BALANCE_MAX_TEMP - balancing suspended
+} bq7693_balance_state_t;
+
+typedef struct
+{
+  bq7693_balance_state_t state;
+  uint16_t v_min_mv;
+  uint16_t v_max_mv;
+  uint16_t spread_mv;
+  uint8_t  max_cell;     // index of the highest cell
+  uint8_t  cell_mask;    // bit n set = cell n is bleeding
+  uint8_t  num_cells;    // popcount of cell_mask
+} bq7693_balance_status_t;
+
+void bq7693_set_balancing(uint8_t cellbal1, uint8_t cellbal2);
+void bq7693_disable_balancing(void);
+void bq7693_balance_update(bq7693_balance_status_t *status);
+
+#endif /* CELL_BALANCE_ENABLE */
+
 // register map
 #define SYS_STAT        0x00
 #define CELLBAL1        0x01
@@ -189,19 +223,36 @@ typedef union regPROTECT3 {
   uint8_t regByte;
 } regPROTECT3_t;
 
-typedef union regCELLBAL
+// NB: bitfields are allocated LSB-first by GCC on this target, so CB1/CB6 must
+// be declared FIRST to land on bit 0. The previous MSB-first declaration put CB1
+// on bit 7 and would have driven entirely the wrong balance channels.
+typedef union regCELLBAL1
 {
   struct
   {
-    uint8_t RSVD        :3;
-    uint8_t CB5         :1;
-    uint8_t CB4         :1;
-    uint8_t CB3         :1;
+    uint8_t CB1         :1;   // bit 0
     uint8_t CB2         :1;
-    uint8_t CB1         :1;
+    uint8_t CB3         :1;
+    uint8_t CB4         :1;
+    uint8_t CB5         :1;   // bit 4
+    uint8_t RSVD        :3;
   } bits;
   uint8_t regByte;
-} regCELLBAL_t;
+} regCELLBAL1_t;
+
+typedef union regCELLBAL2
+{
+  struct
+  {
+    uint8_t CB6         :1;   // bit 0
+    uint8_t CB7         :1;
+    uint8_t CB8         :1;
+    uint8_t CB9         :1;
+    uint8_t CB10        :1;   // bit 4
+    uint8_t RSVD        :3;
+  } bits;
+  uint8_t regByte;
+} regCELLBAL2_t;
 
 typedef union regVCELL
 {

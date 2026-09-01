@@ -346,6 +346,187 @@ void bms_mainloop(void)
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL FUNCTIONS
 -----------------------------------------------------------------------------*/
+/*-----------------------------------------------------------------------------
+    Passive cell balancing
+-----------------------------------------------------------------------------*/
+#if CELL_BALANCE_ENABLE
+
+static sw_timer                bms_balance_timer = 0;
+static sw_timer                bms_balance_led_timer = 0;
+static bq7693_balance_status_t bms_balance_status;
+static uint8_t                 bms_balance_last_mask  = 0;
+static bq7693_balance_state_t  bms_balance_last_state = BQ_BALANCE_IDLE;
+
+/** @brief Turn balancing off and re-arm the tick so the next call evaluates immediately. */
+static void bms_balance_stop(void)
+{
+  bq7693_disable_balancing();
+  bms_balance_status.state = BQ_BALANCE_IDLE;
+  bms_balance_status.cell_mask = 0;
+  bms_balance_last_mask    = 0;
+  bms_balance_last_state   = BQ_BALANCE_IDLE;
+  sw_timer_stop(&bms_balance_timer);
+
+  //Park the LEDs too - callers either redraw immediately (charging breathe,
+  //fault blink code) or leave them off, and this stops a half-finished
+  //alternation being left lit on the way out to BMS_IDLE.
+  sw_timer_stop(&bms_balance_led_timer);
+  leds_off();
+}
+
+/**
+ * @brief Periodic balancing tick.
+ *
+ * Only call with the charge FET OFF and the cells given CELL_BALANCE_RELAX_MS to
+ * settle - while charging, the measured spread is mostly IR drop across the cell
+ * interconnects and the balancer would chase noise.
+ *
+ * @return true while one or more cells are actively bleeding.
+ */
+static bool bms_balance_tick(void)
+{
+  if (!sw_timer_is_elapsed(&bms_balance_timer, CELL_BALANCE_PERIOD_MS))
+    return (bms_balance_status.state == BQ_BALANCE_ACTIVE);
+
+  sw_timer_start(&bms_balance_timer);
+
+  //Balancing dumps the imbalance as heat inside the pack, unattended, for hours
+  //at a time - so it respects the charge temperature ceiling too. Checked here
+  //rather than in bq7693_balance_update() because the NTC is not the AFE's.
+  pack_temperature = bms_read_temperature();
+
+  if ((pack_temperature / 10) >= CELL_BALANCE_MAX_TEMP)
+  {
+    bq7693_disable_balancing();
+    bms_balance_status.state     = BQ_BALANCE_TOO_HOT;
+    bms_balance_status.cell_mask = 0;
+    bms_balance_status.num_cells = 0;
+  }
+  else
+  {
+    bq7693_balance_update(&bms_balance_status);
+  }
+
+  // Only log on a change, otherwise a multi-hour balance floods the debug queue.
+  if (   bms_balance_status.state     != bms_balance_last_state
+      || bms_balance_status.cell_mask != bms_balance_last_mask)
+  {
+    switch (bms_balance_status.state)
+    {
+      case BQ_BALANCE_ACTIVE:
+        BMS_PRINT("BMS:BAL n=%u m=0x%02X d=%umV lo=%u hi=%u\r\n",
+                  bms_balance_status.num_cells, bms_balance_status.cell_mask,
+                  bms_balance_status.spread_mv,
+                  bms_balance_status.v_min_mv,  bms_balance_status.v_max_mv);
+        break;
+
+      case BQ_BALANCE_IDLE:
+        BMS_PRINT("BMS:BAL_DONE d=%umV\r\n", bms_balance_status.spread_mv);
+        break;
+
+      case BQ_BALANCE_CELL_FAIL:
+        // A cell will not charge up to meet the rest. Bleeding the healthy cells
+        // down to it would waste most of the pack, so we refuse and say so.
+        BMS_PRINT("BMS:BAL_CELL_FAIL d=%umV lo=%umV hi=%umV\r\n",
+                  bms_balance_status.spread_mv,
+                  bms_balance_status.v_min_mv, bms_balance_status.v_max_mv);
+        break;
+
+      case BQ_BALANCE_OV:
+        BMS_PRINT("BMS:BAL_OV c%u=%umV\r\n",
+                  bms_balance_status.max_cell, bms_balance_status.v_max_mv);
+        break;
+
+      case BQ_BALANCE_TOO_HOT:
+        BMS_PRINT("BMS:BAL_HOT t=%dC max=%dC\r\n",
+                  (int)(pack_temperature / 10), (int)CELL_BALANCE_MAX_TEMP);
+        break;
+
+      case BQ_BALANCE_TOO_LOW:
+      default:
+        break;
+    }
+
+    bms_balance_last_state = bms_balance_status.state;
+    bms_balance_last_mask  = bms_balance_status.cell_mask;
+  }
+
+  return (bms_balance_status.state == BQ_BALANCE_ACTIVE);
+}
+
+/**
+ * @brief Non-blocking LED indication for the balancing states.
+ *
+ * Must not use leds_blink_*() - those all spin in sw_timer_delay_ms() and would
+ * stall the balancing supervision. The pattern position is derived from elapsed
+ * time rather than a step counter, so it looks the same whatever rate the
+ * caller happens to poll at.
+ *
+ * ACTIVE    - LEDs alternate left<->right. Every other pattern in this firmware
+ *             drives both LEDs together, so this cannot be mistaken for one.
+ * CELL_FAIL - three fast blinks then a pause: a cell will not come up to meet
+ *             the others and the pack needs looking at.
+ */
+static void bms_balance_leds(void)
+{
+  const uint32_t alt = CELL_BALANCE_LED_ALT_MS;
+  uint32_t t;
+  bool     left;
+
+  if (!sw_timer_is_started(&bms_balance_led_timer))
+    sw_timer_start(&bms_balance_led_timer);
+
+  t = (uint32_t)sw_timer_get_elapsed_time(&bms_balance_led_timer);
+
+  switch (bms_balance_status.state)
+  {
+    case BQ_BALANCE_ACTIVE:
+      //Steady left<->right sweep at reduced brightness.
+      left = (((t / alt) & 1ul) == 0ul);
+      leds_set_led_duty(LEDS_LED_ERR_LEFT,  left ? CELL_BALANCE_LED_DUTY : 0);
+      leds_set_led_duty(LEDS_LED_ERR_RIGHT, left ? 0 : CELL_BALANCE_LED_DUTY);
+      break;
+
+    case BQ_BALANCE_CELL_FAIL:
+    {
+      //Same sweep so it still reads as "balancing", but at full brightness and
+      //broken by a blackout every three sweeps - "a cell will not come up".
+      //Deliberately not a blink-count pattern: that would be read as a
+      //BMS_FAULT error code.
+      uint32_t ph = t % (alt * 8ul);
+
+      if (ph < (alt * 6ul))
+      {
+        left = (((ph / alt) & 1ul) == 0ul);
+        leds_set_led_duty(LEDS_LED_ERR_LEFT,  left ? 100 : 0);
+        leds_set_led_duty(LEDS_LED_ERR_RIGHT, left ? 0 : 100);
+      }
+      else
+      {
+        leds_off();
+      }
+      break;
+    }
+
+    default:
+      leds_off();
+      break;
+  }
+}
+
+/** @brief True once a cell has passed CELL_BALANCE_OV_GUARD_MV - charging must stop. */
+static bool bms_balance_overvoltage(void)
+{
+  return (bms_balance_status.state == BQ_BALANCE_OV);
+}
+
+#else /* !CELL_BALANCE_ENABLE */
+#define bms_balance_stop()         do { } while (0)
+#define bms_balance_leds()         do { } while (0)
+#define bms_balance_tick()         (false)
+#define bms_balance_overvoltage()  (false)
+#endif
+
 /** @brief Set bms_error to code only if code is more severe than the current error. */
 static void bms_set_error(enum BMS_ERROR_CODE code)
 {
@@ -757,6 +938,9 @@ static void bms_handle_sleep(void)
 {
   bms_wdt_deinit();
   serial_debug_send_message("BMS:GOING_TO_SLEEP\r\n");
+  //CELLBAL must be cleared before SHIP mode - the BQ7693 re-enters NORMAL with
+  //balancing off, but leaving bits set here would bleed cells on the way down.
+  bms_balance_stop();
   bq7693_disable_charge();
   bq7693_disable_discharge();
 
@@ -781,6 +965,9 @@ static void bms_handle_vacuum_running(void)
 #ifdef SERIAL_DEBUG
   uint8_t debug_print_cnt = 0;
 #endif
+
+  //Never bleed cells while the motor is drawing current.
+  bms_balance_stop();
 
   if (!bms_is_safe_to_discharge())
   {
@@ -836,6 +1023,8 @@ static void bms_handle_fault(void)
   leds_off();
   dsn_prot_set_trigger(false);
   bq7693_disable_discharge();
+  bq7693_disable_charge();
+  bms_balance_stop();
   port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
 
   if (auto_recover)
@@ -916,17 +1105,63 @@ static void bms_handle_charger_connected(void)
 /** @brief Not charging: manage standby sleep while charger is connected. */
 static void bms_handle_charger_connected_not_charging(void)
 {
+  sw_timer relax_timer = 0;
+  bool     balancing   = false;
+  //Do not drop into standby before balancing has had a chance to look at the
+  //pack - the vacuum usually asks to sleep within a second or two of docking,
+  //and the next RTC wake is days away. Always false when balancing is compiled
+  //out, so standby behaviour is unchanged in that build.
+  bool     balance_evaluated = !CELL_BALANCE_ENABLE;
+
   leds_blink_leds(2000);
+
+  //The charge FET is already off on entry to this state; give the cells time to
+  //settle before the first balancing decision is taken.
+  sw_timer_start(&relax_timer);
 
   while(1)
   {
     if (!dio_read(DIO_CHARGER_CONNECTED))
     {
+      bms_balance_stop();
       bms_state = BMS_IDLE;
       return;
     }
-    else if(dsn_prot_get_sleep_flag() == true)
+
+    //This is where the pack sits for hours on the dock, so this is where the
+    //balancing actually gets done. NB sw_timer_is_elapsed() stops the timer when
+    //it fires and a stopped timer keeps reading as elapsed, so this latches on
+    //after the relax period; bms_balance_tick() rate-limits itself from there.
+    if (sw_timer_is_elapsed(&relax_timer, CELL_BALANCE_RELAX_MS))
     {
+      balancing         = bms_balance_tick();
+      balance_evaluated = true;
+    }
+
+    bms_balance_leds();
+
+    if (bms_balance_overvoltage())
+    {
+      //A cell passed the guard with the charger still attached - make sure
+      //nothing can feed it, and hand over to the fault handler.
+      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+      bq7693_disable_charge();
+      bms_balance_stop();
+      bms_force_fault(BMS_ERR_OVERVOLTAGE);
+      return;
+    }
+
+    if (dsn_prot_get_sleep_flag() == true)
+    {
+      if (balancing || !balance_evaluated)
+      {
+        //Standby stops the 1ms tick, and the balancing supervision with it.
+        //Stay awake while cells are bleeding: a few mA of MCU is noise next to
+        //the balance current, and the alternative is balancing never running.
+        sw_timer_delay_ms(250);
+        continue;
+      }
+
       rtc_standby_timer_start();
       bms_enter_standby();
       serial_debug_send_message("BMS_STANDBY\r\n");
@@ -953,9 +1188,15 @@ static void bms_handle_charger_connected_not_charging(void)
         sw_timer_delay_ms(250);
       }
 
+      //Cells rested through standby, but re-arm the relax timer anyway so the
+      //post-wake protocol traffic settles before the next balancing decision.
+      sw_timer_start(&relax_timer);
+      balance_evaluated = !CELL_BALANCE_ENABLE;
+
       // check if pack needs top-up charging on any wakeup
       if (!bms_is_pack_full())
       {
+        bms_balance_stop();
         bms_state = BMS_CHARGER_CONNECTED;
         return;
       }
@@ -1044,6 +1285,7 @@ static void bms_handle_charging(void)
       port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
       bq7693_disable_charge();
 
+      bms_balance_stop();
       leds_off();
       bms_state = BMS_FAULT;
       return;
@@ -1055,6 +1297,7 @@ static void bms_handle_charging(void)
       //Turn off charging
       port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
       bq7693_disable_charge();
+      bms_balance_stop();
 
       // Re-enable discharge FET only if a vacuum is currently connected;
       // otherwise leave it to the idle loop's vacuum-connect edge.
@@ -1081,25 +1324,49 @@ static void bms_handle_charging(void)
       port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
       bq7693_disable_charge();
 
-      //Delay for 30 seconds, then go and try again.
-      for (int i=0; i<30; ++i)
+      //Delay for 30 seconds, then go and try again. Stepped at 250ms rather
+      //than 1s so the balancing LED alternation is not aliased, and so an
+      //unplugged charger is noticed within a quarter second.
       {
-        sw_timer_delay_ms(1000);
-        wdt_reset_count();
-        //If it has, abandon the charge process and return to main loop
-        if (!dio_read(DIO_CHARGER_CONNECTED))
+        sw_timer pause_timer = 0;
+        sw_timer_start(&pause_timer);
+
+        while (!sw_timer_is_elapsed(&pause_timer, 30000ul))
         {
-          //Charger's been unplugged.
-          if (dsn_prot_get_vacuum_connected() && bms_is_safe_to_discharge())
+          sw_timer_delay_ms(250);
+          wdt_reset_count();
+          //If it has, abandon the charge process and return to main loop
+          if (!dio_read(DIO_CHARGER_CONNECTED))
           {
-            bq7693_enable_discharge();
+            //Charger's been unplugged.
+            bms_balance_stop();
+            if (dsn_prot_get_vacuum_connected() && bms_is_safe_to_discharge())
+            {
+              bq7693_enable_discharge();
+            }
+            leds_off();
+            bms_state = BMS_CHARGER_UNPLUGGED;
+            return;
           }
-          leds_off();
-          bms_state = BMS_CHARGER_UNPLUGGED;
-          return;
+
+          //Once the cells have relaxed, start bleeding the high ones. The bulk
+          //of the balancing happens later in BMS_CHARGER_CONNECTED_NOT_CHARGING
+          //- at ~2-3mA there is nothing meaningful to gain in 30 seconds - but
+          //starting here means a pack that is already close only needs the pause.
+          if (sw_timer_get_elapsed_time(&pause_timer) >= CELL_BALANCE_RELAX_MS)
+          {
+            (void)bms_balance_tick();
+          }
+
+          bms_balance_leds();
         }
       }
       charge_pause_counter++;
+
+      //Balancing decisions are only valid on relaxed cells, so stop bleeding
+      //before the charge current comes back.
+      bms_balance_stop();
+
       //Restart charging
       port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
       bq7693_enable_charge();
@@ -1162,6 +1429,8 @@ static void bms_handle_charging(void)
 /** @brief Charger unplugged: show cell balance via LED blinks. */
 static void bms_handle_charger_unplugged(void)
 {
+  bms_balance_stop();
+
   //Do a little flash to show how out of sync the pack is, then go to idle.
   uint16_t *cell_voltages = bq7693_get_cell_voltages();
 
