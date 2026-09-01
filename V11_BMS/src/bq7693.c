@@ -128,6 +128,17 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
 
   uint16_t timeout = 0;
   bool result = true;
+  /* The BQ7693003 has CRC enabled, so it sends a CRC byte after every data
+     byte. Read the pair and check it - len counts DATA bytes only. */
+  uint8_t raw[BQ7693_MAX_READ_LEN * 2u];
+  size_t  i;
+
+  if ((len == 0u) || (len > BQ7693_MAX_READ_LEN))
+  {
+    bq7693_comm_ok = false;
+    system_interrupt_enable(SYSTEM_INTERRUPT_MODULE_EIC);
+    return false;
+  }
 
   //Initial write to set register address.
   struct i2c_master_packet packet =
@@ -149,18 +160,58 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
       break;
     }
   }
-  //Rx value
-  packet.data_length = len;
-  packet.data = buf;
-  timeout = 0;
 
-  while (i2c_master_read_packet_wait(&i2c_master_instance, &packet) != STATUS_OK)
+  //Rx data+CRC pairs
+  if (result)
   {
-    /* Increment timeout counter and check if timed out. */
-    if (timeout++ >= BQ7693_TIMEOUT)
+    packet.data_length = (uint16_t)(len * 2u);
+    packet.data = raw;
+    timeout = 0;
+
+    while (i2c_master_read_packet_wait(&i2c_master_instance, &packet) != STATUS_OK)
     {
-      result = false;
-      break;
+      /* Increment timeout counter and check if timed out. */
+      if (timeout++ >= BQ7693_TIMEOUT)
+      {
+        result = false;
+        break;
+      }
+    }
+  }
+
+  /* Verify every CRC before handing any of it to the caller. Datasheet
+     SLUSBK2I 8.3.1.1.2: the first data byte's CRC covers the slave address
+     with the R/W bit set plus the data byte; subsequent bytes are covered on
+     their own. */
+  if (result)
+  {
+    for (i = 0u; i < len; i++)
+    {
+      uint8_t crc;
+
+      if (i == 0u)
+      {
+        crc = bq7693_calc_checksum(0x00, (uint8_t)((BQ7693_ADDR << 1) | 0x01u));
+        crc = bq7693_calc_checksum(crc, raw[0]);
+      }
+      else
+      {
+        crc = bq7693_calc_checksum(0x00, raw[i * 2u]);
+      }
+
+      if (crc != raw[(i * 2u) + 1u])
+      {
+        result = false;
+        break;
+      }
+    }
+  }
+
+  if (result)
+  {
+    for (i = 0u; i < len; i++)
+    {
+      buf[i] = raw[i * 2u];
     }
   }
 
@@ -325,7 +376,7 @@ void bq7693_disable_discharge(void)
  */
 uint16_t *bq7693_get_cell_voltages(void)
 {
-  uint8_t scratch[3];
+  uint8_t scratch[2];
   uint16_t tempval;
   //Voltages for each cell
   //The cells are connected as below on these packs...
@@ -334,7 +385,7 @@ uint16_t *bq7693_get_cell_voltages(void)
   for (int i=0; i< 7; ++i)
   {
     //Because CRC is enabled, we need to read 3 bytes (VCx_HI, the CRC byte (ignore), then VCx_Lo)
-    if (!bq7693_read_register((VC1_HI_BYTE + 2*cellsToRead[i]), 3, scratch))
+    if (!bq7693_read_register((VC1_HI_BYTE + 2*cellsToRead[i]), 2, scratch))
     {
       /* scratch[] is a stack local - using it here would report whatever
          happened to be on the stack as a cell voltage. Report 0mV instead,
@@ -342,7 +393,7 @@ uint16_t *bq7693_get_cell_voltages(void)
       bq7693_cell_voltages[i] = 0;
       continue;
     }
-    tempval = ((scratch[0] & 0x3F) <<8) | scratch[2];
+    tempval = ((scratch[0] & 0x3F) <<8) | scratch[1];
     bq7693_cell_voltages[i] = tempval * bq7693_adc_gain/1000 + bq7693_adc_offset;
   }
 
@@ -356,13 +407,13 @@ uint16_t *bq7693_get_cell_voltages(void)
  */
 int bq7693_get_pack_voltage(void)
 {
-  uint8_t scratch[3];
+  uint8_t scratch[2];
   uint16_t tempval;
-  if (!bq7693_read_register(BAT_HI_BYTE, 3, scratch))
+  if (!bq7693_read_register(BAT_HI_BYTE, 2, scratch))
   {
     return 0;
   }
-  tempval = scratch[0] <<8 | scratch[2];
+  tempval = scratch[0] <<8 | scratch[1];
   int bq7693_pack_voltage = 4 * bq7693_adc_gain * tempval / 1000 + ( 7 * bq7693_adc_offset);
   return bq7693_pack_voltage;
 }
@@ -585,13 +636,13 @@ int16_t bq7693_read_cc(void)
 {
   int16_t tempCC;
 
-  uint8_t scratch[3];
-  if (!bq7693_read_register(CC_HI_BYTE, 3, scratch))
+  uint8_t scratch[2];
+  if (!bq7693_read_register(CC_HI_BYTE, 2, scratch))
   {
     return 0;
   }
   tempCC =  ((scratch[0])<<8);
-  tempCC |= scratch[2]; //ignore the unwanted CRC byte.
+  tempCC |= scratch[1];
 
   return tempCC;
 }

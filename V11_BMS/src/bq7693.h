@@ -21,6 +21,10 @@
 #define BQ7693_ADDR 0x08
 #define BQ7693_TIMEOUT 100
 
+/* Max DATA bytes per read. The device interleaves a CRC byte after each,
+   so the on-the-wire transfer is twice this. */
+#define BQ7693_MAX_READ_LEN 4
+
 #define THERMISTOR_BETA_VALUE 3435.0  // typical value for Semitec 103AT-5 thermistor
 
 void bq7693_init(void);
