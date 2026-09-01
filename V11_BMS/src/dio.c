@@ -105,6 +105,7 @@ void dio_mainloop(void)
       c = &dio_cfg[i];
       in = port_pin_get_input_level(c->gpio_pin);
       dio_debounce(in, d->value_old, &(d->debounced_value), &(d->debounce_counter), c->deb_ticks);
+      d->value_old = (uint8_t)in;
     }
   }
 }
@@ -130,8 +131,9 @@ bool dio_read(dio_type_t dio)
 /**
  * @brief Generic debounce algorithm.
  *
- * Counts consecutive samples where the current value matches value_old.
- * When the counter reaches zero the debounced output is updated.
+ * A change in the raw input restarts the settling window. The new level is
+ * only committed to *debounced_value once it has held for
+ * debounce_counter_preset consecutive calls.
  *
  * @param value                    Current raw input sample.
  * @param value_old                Previous raw input sample.
@@ -142,32 +144,37 @@ bool dio_read(dio_type_t dio)
  */
 bool dio_debounce(uint8_t value, uint8_t value_old, uint8_t *debounced_value, uint16_t *debounce_counter, uint16_t debounce_counter_preset)
 {
-  bool debounce_finished = false;
-
-  if ((*debounce_counter == 0) || (debounce_counter_preset == 0) || (debounced_value == NULL) || (debounce_counter == NULL))
+  if ((debounced_value == NULL) || (debounce_counter == NULL) || (debounce_counter_preset == 0u))
   {
-    debounce_finished = true;
-    *debounce_counter = 0;
+    return true;
   }
-  else
+
+  if (value != value_old)
   {
-    if (value != value_old)
+    /* the input just moved - (re)start the settling window */
+    *debounce_counter = debounce_counter_preset;
+    return false;
+  }
+
+  if (value == *debounced_value)
+  {
+    /* stable and already agrees with the output - nothing to settle */
+    *debounce_counter = 0u;
+    return true;
+  }
+
+  /* stable, but different from the output - count it down */
+  if (*debounce_counter != 0u)
+  {
+    (*debounce_counter)--;
+    if (*debounce_counter != 0u)
     {
-      *debounce_counter = debounce_counter_preset;
-    }
-    else
-    {
-      *debounce_counter = *debounce_counter - 1;
+      return false;
     }
   }
 
-  if (*debounce_counter == 0)
-  {
-    debounce_finished = true;
-    *debounced_value = value;                       /* latest value is considered to be the new debounced value */
-  }
-
-  return debounce_finished;
+  *debounced_value = value;
+  return true;
 }
 
 /*-----------------------------------------------------------------------------
