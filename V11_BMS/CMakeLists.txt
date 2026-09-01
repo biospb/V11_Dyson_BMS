@@ -67,10 +67,12 @@ set(COMMON_C_FLAGS
 
 add_compile_options(${COMMON_C_FLAGS})
 
-# Debug:   -Og, debug symbols
+# Debug:   -Os + full debug symbols. -g3 costs no flash (DWARF lives in
+#          non-allocated sections), but -Og costs ~3.8KB over -Os, which no
+#          longer fits the 30208 byte ROM region.
 # Release: -Os, no debug symbols
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_compile_options(-Og -g3)
+    add_compile_options(-Os -g3)
 else()
     add_compile_options(-Os)
     add_compile_definitions(NDEBUG)

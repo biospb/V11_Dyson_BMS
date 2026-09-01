@@ -53,6 +53,14 @@
 #define SERIAL_DEBUG                        1 //Serial debug via the spare USART on the programming pins header
 #define PROT_DEBUG_PRINT                    1
 
+// Use the small built-in integer formatter (tiny_printf.c) for the debug log
+// instead of the C library snprintf. newlib's snprintf costs ~2.6KB of flash
+// and ~312B of RAM, and pulls in the whole heap (_malloc_r/_free_r/_realloc_r/
+// _sbrk_r) purely as a side effect. Only the conversions the firmware actually
+// uses are supported: %d %i %u %x %X %c %s %%, with an optional '0' flag,
+// width and 'l' modifier. Set to 0 to go back to the C library.
+#define TINY_PRINTF_ENABLE                  1
+
 // Trigger behaviour: 0 = momentary (hold to run), 1 = toggle (press to run/stop).
 #define TRIGGER_TOGGLE_MODE                 0
 

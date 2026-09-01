@@ -39,7 +39,7 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
 #define BMS_PRINT(...) \
 { \
   char _dbg_tmp[DEBUG_MSG_BUFFER_SIZE]; \
-  snprintf(_dbg_tmp, sizeof(_dbg_tmp), __VA_ARGS__); \
+  DEBUG_SNPRINTF(_dbg_tmp, sizeof(_dbg_tmp), __VA_ARGS__); \
   serial_debug_send_message(_dbg_tmp);  \
 }
 #else

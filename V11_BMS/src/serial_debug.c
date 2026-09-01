@@ -154,11 +154,11 @@ void serial_debug_send_cell_voltages(void)
 
   for (int i=0; i<7; ++i)
   {
-    snprintf(tmp, sizeof(tmp), " %d ", cell_voltages[i]);
+    DEBUG_SNPRINTF(tmp, sizeof(tmp), " %d ", cell_voltages[i]);
     serial_debug_send_message(tmp);
   }
 
-  snprintf(tmp, sizeof(tmp), "P: %d\r\n", bq7693_get_pack_voltage());
+  DEBUG_SNPRINTF(tmp, sizeof(tmp), "P: %d\r\n", bq7693_get_pack_voltage());
   serial_debug_send_message(tmp);
 #endif
 }
@@ -172,7 +172,7 @@ void serial_debug_send_pack_capacity(void)
 {
 #if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
   char tmp[30];
-  snprintf(tmp, sizeof(tmp), "C: %ld mAh\r\n", eeprom_data.current_charge_level/1000);
+  DEBUG_SNPRINTF(tmp, sizeof(tmp), "C: %ld mAh\r\n", eeprom_data.current_charge_level/1000);
   serial_debug_send_message(tmp);
 #endif
 }

@@ -12,6 +12,7 @@
   INCLUDE FILES
 ---------------------------------------------------------------------------- */
 #include "asf.h"
+#include "tiny_printf.h"
 #include "config.h"
 #include "bq7693.h"
 
