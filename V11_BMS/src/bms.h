@@ -38,21 +38,41 @@ enum BMS_STATE
   BMS_SLEEP,
 };
 
+/*
+ * Fault codes. Purely internal - nothing here goes out over the Dyson
+ * protocol - so the numbering is ours to choose, and two properties are
+ * deliberate:
+ *
+ *   1. The self-recovering faults are 1..BMS_ERR_SHORTCIRCUIT. That split is
+ *      what bms_blink_error_code() signals: those are blinked as short pulses
+ *      counting 1..4, everything above as long pulses counting 1..6. Pulse
+ *      length gives the class, pulse count gives the code within it, and no
+ *      pattern ever mixes the two.
+ *
+ *   2. The order is still ascending by severity, because bms_set_error() only
+ *      ever raises. When several conditions are true at once the highest wins,
+ *      and BMS_ERR_I2C_FAIL sits near the top because a dead bus invalidates
+ *      every other reading.
+ */
 enum BMS_ERROR_CODE
 {
-  BMS_ERR_NONE,            // 0  All good!
-  BMS_ERR_PACK_DISCHARGED, // 1  Pack is flat - not really a bad error....
-  BMS_ERR_UNDERVOLTAGE,    // 2  BMS IC undervoltage trip - flat pack, detected by BQ.
-  BMS_ERR_PACK_UNDERTEMP,  // 3  Pack is below -40 if attempting discharge, or 0 if attempting charge.
-  BMS_ERR_PACK_OVERTEMP,   // 4  Pack thermistor reading exceeded MAX_PACK_TEMPERATURE - default 60'C
-  BMS_ERR_CELL_FAIL,       // 5  A cell voltage is below safe minimum.
-  BMS_ERR_OVERVOLTAGE,     // 6  BMS IC overvoltage trip
-  BMS_ERR_OVERCURRENT,     // 7  BMS IC overcurrent trip
-  BMS_ERR_SHORTCIRCUIT,    // 8  BMS IC short circuit trip
-  BMS_ERR_I2C_FAIL,        // 9  BQ7693 unreachable/corrupt, or the AFE itself
-                           //    reported an internal fault (DEVICE_XREADY) or
-                           //    an external protector pulled ALERT (OVRD_ALERT)
-  BMS_ERR_WDT,             // 10 Watchdog early warning fired - main loop stalled!
+  BMS_ERR_NONE,            //  0  All good!
+
+  /* --- self-recovering: retried every 5s, shown as short pulses only --- */
+  BMS_ERR_PACK_UNDERTEMP,  //  1  Below MIN_PACK_DISCHARGE_TEMP / MIN_PACK_CHARGE_TEMP
+  BMS_ERR_PACK_OVERTEMP,   //  2  Above MAX_PACK_TEMPERATURE / MAX_PACK_CHARGE_TEMP
+  BMS_ERR_OVERCURRENT,     //  3  BMS IC overcurrent trip
+  BMS_ERR_SHORTCIRCUIT,    //  4  BMS IC short circuit trip
+
+  /* --- needs attention: at least one long pulse --- */
+  BMS_ERR_PACK_DISCHARGED, //  5  A cell below CELL_LOWEST_DISCHARGE_VOLTAGE
+  BMS_ERR_UNDERVOLTAGE,    //  6  BMS IC undervoltage trip - flat pack, detected by BQ
+  BMS_ERR_CELL_FAIL,       //  7  A cell below CELL_LOWEST_CHARGE_VOLTAGE - too flat to charge
+  BMS_ERR_OVERVOLTAGE,     //  8  BMS IC overvoltage trip
+  BMS_ERR_I2C_FAIL,        //  9  BQ7693 unreachable/corrupt, or the AFE itself
+                           //     reported an internal fault (DEVICE_XREADY) or
+                           //     an external protector pulled ALERT (OVRD_ALERT)
+  BMS_ERR_WDT,             // 10  Watchdog early warning fired - main loop stalled!
 };
 
 /*-----------------------------------------------------------------------------

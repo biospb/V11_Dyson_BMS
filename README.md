@@ -121,6 +121,47 @@ Capacity is clamped to 120% of `PACK_MAX_CAPACITY_MAH` to reject outliers.
 
 While the battery is actively charging, press the trigger **20 times within 2 seconds**. The left error LED will blink 10 times to confirm the reset. This restores the default capacity and charge level values.
 
+## Fault Codes
+
+When the BMS faults, both LEDs blink a pattern, pause, and repeat. **The
+length of the flashes tells you which kind of fault it is; the number of
+flashes tells you which one.** Every pattern uses one flash length only, so
+there is only ever one thing to count.
+
+### Short flashes - clears itself
+
+The BMS retries every 5 seconds and resumes on its own once the condition goes
+away. Nothing to do but wait.
+
+| Pattern | Meaning |
+|---------|---------|
+| `-` | Pack too cold to charge or discharge |
+| `- -` | Pack too hot to charge or discharge |
+| `- - -` | Overcurrent trip |
+| `- - - -` | Short circuit trip |
+
+### Long flashes - needs attention
+
+| Pattern | Meaning |
+|---------|---------|
+| `___` | Pack flat - a cell below the discharge floor |
+| `___ ___` | Undervoltage trip detected by the BQ7693 |
+| `___ ___ ___` | A cell is too flat to charge safely |
+| `___ ___ ___ ___` | Overvoltage trip |
+| `___ ___ ___ ___ ___` | BQ7693 unreachable, bad CRC, internal AFE fault, or an external protector fired |
+| `___ ___ ___ ___ ___ ___` | Watchdog fired - firmware stalled |
+
+`___` = long flash (700 ms), `-` = short flash (150 ms).
+
+A watchdog fault only appears if the firmware stalled for between 0.5 and 1.0
+seconds and then recovered. A stall past 1.0 seconds resets the MCU outright,
+so a genuine hang shows up as the pack restarting, not as a blink pattern.
+
+The fault display gives up after `FAULT_DISPLAY_TIME` (5 minutes) and the pack
+shuts down, so a flat pack does not sit blinking itself further into the
+ground. Plugging in the charger or pulling the trigger leaves the fault state
+immediately.
+
 ## License
 
 GNU GPL v3 or later

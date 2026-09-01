@@ -59,6 +59,17 @@
 // LEDs and discharging itself further. Long enough to read the blink count.
 #define FAULT_DISPLAY_TIME                  60 * 5  // seconds
 
+// Fault codes are blinked as a uniform run of pulses, with the pulse LENGTH
+// carrying the class and the COUNT carrying the code within that class:
+//   short pulses -> self-recovering fault, counts 1..4
+//   long pulses  -> needs attention,       counts 1..6
+// Keeping every pattern uniform means there is only ever one thing to count,
+// and the longest run is six rather than ten.
+#define FAULT_BLINK_LONG_MS                 700
+#define FAULT_BLINK_SHORT_MS                150
+#define FAULT_BLINK_GAP_MS                  350   // between pulses
+#define FAULT_BLINK_REPEAT_MS               2500  // before the pattern repeats
+
 // Once a cell reaches max charge volts, stop charging, let the pack settle,
 // then retry - this many times before declaring the pack full. The pause is
 // also when the balancer gets to work on the charge path, and it only starts

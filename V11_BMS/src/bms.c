@@ -134,6 +134,7 @@ static void    bms_handle_charger_connected_not_charging(void);
 static void    bms_handle_charging(void);
 static void    bms_handle_charger_unplugged(void);
 static bool    bms_fault_pending(void);
+static void    bms_blink_error_code(enum BMS_ERROR_CODE code);
 static void    bms_sys_stat_service(void);
 static uint8_t bms_sys_stat_take(void);
 static void    bms_enter_standby(void);
@@ -684,6 +685,38 @@ void bms_force_fault(enum BMS_ERROR_CODE code)
 }
 
 /**
+ * @brief Blink a fault code as a uniform run of pulses.
+ *
+ * Pulse LENGTH carries the class, pulse COUNT carries the code within it:
+ *
+ *   self-recovering (1..BMS_ERR_SHORTCIRCUIT)  short pulses, count 1..4
+ *   needs attention (above that)               long pulses,  count 1..6
+ *
+ * Every pattern is uniform, so there is only ever one thing to count, and the
+ * longest run is six. Ten identical blinks - the previous scheme - cannot be
+ * counted by eye at all.
+ */
+static void bms_blink_error_code(enum BMS_ERROR_CODE code)
+{
+  const bool     recoverable = (code <= BMS_ERR_SHORTCIRCUIT);
+  const uint32_t on_ms       = recoverable ? FAULT_BLINK_SHORT_MS : FAULT_BLINK_LONG_MS;
+  const uint8_t  count       = recoverable ? (uint8_t)code
+                                           : (uint8_t)(code - BMS_ERR_SHORTCIRCUIT);
+  uint8_t i;
+
+  for (i = 0u; i < count; i++)
+  {
+    leds_on();
+    sw_timer_delay_ms(on_ms);
+    leds_off();
+    sw_timer_delay_ms(FAULT_BLINK_GAP_MS);
+    wdt_reset_count();
+  }
+
+  leds_off();
+}
+
+/**
  * @brief True if something outside the current handler has demanded a fault.
  *
  * bms_force_fault() is called from the watchdog early-warning interrupt, but
@@ -844,6 +877,16 @@ static int16_t bms_read_temperature(void)
  */
 static bool bms_is_safe_to_discharge(void)
 {
+  /*
+   * Snapshot a fault that is already pending - bms_force_fault() sets both
+   * bms_error and bms_state from the watchdog ISR - so that evaluating fresh
+   * conditions here cannot erase its code. Without this the fault reached
+   * bms_handle_fault() as BMS_ERR_NONE and blinked zero times: honoured, but
+   * completely silent and misattributed.
+   */
+  const enum BMS_ERROR_CODE pending = (bms_state == BMS_FAULT) ? bms_error : BMS_ERR_NONE;
+  bool safe;
+
   //Clear error status.
   bms_error = BMS_ERR_NONE;
   bq7693_comm_clear_error();
@@ -926,10 +969,13 @@ static bool bms_is_safe_to_discharge(void)
     BMS_PRINT("%s: BQ7693 I2C failure\r\n", __FUNCTION__);
   }
 
-  if (bms_error == BMS_ERR_NONE)
-    return true;
-  else
-    return false;
+  /* The verdict is the fresh evaluation only, so the fault handler's retry
+     sees a true recovery. bms_set_error() only raises, so restoring the
+     pending code cannot mask a worse finding made just now. */
+  safe = (bms_error == BMS_ERR_NONE);
+  bms_set_error(pending);
+
+  return safe;
 }
 
 /**
@@ -938,6 +984,11 @@ static bool bms_is_safe_to_discharge(void)
  */
 static bool bms_is_safe_to_charge(void)
 {
+  /* See bms_is_safe_to_discharge() - a pending fault must survive a fresh
+     evaluation. */
+  const enum BMS_ERROR_CODE pending = (bms_state == BMS_FAULT) ? bms_error : BMS_ERR_NONE;
+  bool safe;
+
   //Clear error status.
   bms_error = BMS_ERR_NONE;
   bq7693_comm_clear_error();
@@ -1014,10 +1065,13 @@ static bool bms_is_safe_to_charge(void)
     BMS_PRINT("%s: BQ7693 I2C failure\r\n", __FUNCTION__);
   }
 
-  if (bms_error == BMS_ERR_NONE)
-    return true;
-  else
-    return false;
+  /* The verdict is the fresh evaluation only, so the fault handler's retry
+     sees a true recovery. bms_set_error() only raises, so restoring the
+     pending code cannot mask a worse finding made just now. */
+  safe = (bms_error == BMS_ERR_NONE);
+  bms_set_error(pending);
+
+  return safe;
 }
 
 /**
@@ -1237,10 +1291,14 @@ static void bms_handle_vacuum_running(void)
 static void bms_handle_fault(void)
 {
   const enum BMS_ERROR_CODE original_error = bms_error;
-  const bool auto_recover = (original_error == BMS_ERR_PACK_UNDERTEMP
-                          || original_error == BMS_ERR_PACK_OVERTEMP
-                          || original_error == BMS_ERR_OVERCURRENT
-                          || original_error == BMS_ERR_SHORTCIRCUIT);
+  /*
+   * The self-recovering codes are exactly 1..BMS_ERR_SHORTCIRCUIT - see the
+   * enum in bms.h. Deriving it from the ordering rather than listing them
+   * again keeps that property true: it is the same ordering the blink pattern
+   * relies on to show recoverable faults without a long pulse.
+   */
+  const bool auto_recover = ((original_error != BMS_ERR_NONE)
+                          && (original_error <= BMS_ERR_SHORTCIRCUIT));
   sw_timer retry_timer = 0;
   sw_timer fault_timer = 0;
 
@@ -1270,14 +1328,9 @@ static void bms_handle_fault(void)
 
   while (1)
   {
-    // Blink the error code N times (N = bms_error), then pause so the user
-    // can count the pattern. Pack-discharged / undervoltage blink once each.
-    for (int i = 0; i < bms_error; ++i)
-    {
-      leds_blink_leds(500);
-      wdt_reset_count();
-    }
-    sw_timer_delay_ms(2000);
+    // Blink the error code, then pause so the user can read the pattern.
+    bms_blink_error_code(bms_error);
+    sw_timer_delay_ms(FAULT_BLINK_REPEAT_MS);
     wdt_reset_count();
 
     if (dio_read(DIO_CHARGER_CONNECTED))
