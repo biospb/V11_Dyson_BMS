@@ -189,6 +189,7 @@ static bool        vacuum_connected;
 static uint32_t    last_motor_speed;
 static bool        pending_sleep;
 static bool        charger_at_sleep;   // latch charger state when entering DSN_SLEEP
+static bool        mode_btn_at_sleep;  // ditto for the mode button
 static sw_timer    motor_speed_timer;
 static bool        motor_speed_seen;
 static bool        handshake_key_seen;
@@ -379,7 +380,21 @@ void dsn_prot_mainloop(void)
 
     //------------------------------------------------------------------------
     case DSN_SLEEP:
-      if (     dio_read(DIO_MODE_BUTTON)
+      /*
+       * Wake stimuli: the mode button changing, the trigger, or the charger
+       * being unplugged. All three need their inputs live - see
+       * handle_sleep(), which deliberately leaves the mode button rail on.
+       *
+       * The mode button is tested for a CHANGE against the state latched on
+       * entry, exactly as the charger already is, rather than for a level.
+       * PA09 is configured identically to the trigger - rising edge, no
+       * internal pull - which says the button drives it high when pressed and
+       * MODE_BUTTON_PULLUP_ENABLE_PIN feeds the rail it switches. But the net
+       * name suggests the opposite sense, in which case an idle button reads
+       * high and a level test would fire the instant this state is entered.
+       * Comparing against the latched value is correct either way.
+       */
+      if (    (dio_read(DIO_MODE_BUTTON) != mode_btn_at_sleep)
            ||  dio_read(DIO_TRIGGER_PRESSED)
            || (charger_at_sleep && !dio_read(DIO_CHARGER_CONNECTED)))
       {
@@ -1064,10 +1079,23 @@ static void handle_sleep(void)
 {
   sleep_flag       = true;
   vacuum_connected = false;
-  charger_at_sleep = dio_read(DIO_CHARGER_CONNECTED);
+  charger_at_sleep  = dio_read(DIO_CHARGER_CONNECTED);
+  mode_btn_at_sleep = dio_read(DIO_MODE_BUTTON);
   bq7693_disable_discharge();
   port_pin_set_output_level(PRECHARGE_PIN, false);
-  port_pin_set_output_level(MODE_BUTTON_PULLUP_ENABLE_PIN, false);
+  /*
+   * The mode button pull-up rail stays ON here on purpose.
+   *
+   * It is a plain GPIO supplying the rail the button switches onto
+   * MODE_BUTTON_PIN, so with it low the button can never read high - and
+   * DSN_SLEEP below polls exactly that as one of its three wake stimuli.
+   * Driving it low here switched off the very signal the next state waits
+   * for, leaving only the trigger and charger-removal to wake the protocol.
+   *
+   * It costs nothing while the button is open, and pins_deinit() still turns
+   * it off on the real power-down path before SHIP mode, which is where the
+   * quiescent draw actually matters.
+   */
   /*
    * sw_timer_delay_ms, not the ASF delay_ms: this runs from
    * dsn_prot_mainloop(), which is itself called from SW_TIMER_SERVICES().
