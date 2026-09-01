@@ -27,6 +27,14 @@ typedef uint32_t sw_timer;
   DEFINITION OF GLOBAL MACROS/#DEFINES
 -----------------------------------------------------------------------------*/
 #define SW_TIMER_TICK_MS      1
+
+/*
+ * Generator that clocks TC0 for the tick. The compare value in
+ * sw_timer_init() is derived from THIS generator's frequency - the two must
+ * not be allowed to drift apart, or every timeout in the firmware scales
+ * wrong without any visible symptom.
+ */
+#define SW_TIMER_GCLK_GENERATOR   GCLK_GENERATOR_1
 #define SW_TIMER_SERVICES()   \
 { \
   dsn_prot_mainloop(); \

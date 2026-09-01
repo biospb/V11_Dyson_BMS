@@ -55,23 +55,32 @@ static void tc_callback_sw_timer(struct tc_module *const module_inst);
 /**
  * @brief Initialise the software timer system.
  *
- * Configures TC0 in match-frequency mode to generate a 1 ms tick
- * interrupt driven by GCLK1.
+ * Configures TC0 in match-frequency mode to generate a SW_TIMER_TICK_MS tick
+ * interrupt, clocked from SW_TIMER_GCLK_GENERATOR.
  */
 void sw_timer_init(void)
 {
   struct tc_config config_tc;
-  uint32_t cycles_per_ms = system_gclk_gen_get_hz(0);
-  cycles_per_ms /= 1000;
+  /*
+   * Must be the frequency of the generator that actually clocks the TC. This
+   * read generator 0 while config_tc.clock_source below selected generator 1;
+   * it produced the right number only because conf_clocks.h happens to run
+   * both from OSC8M at prescaler 1. GCLK1 is also the nominated DFLL source
+   * generator, so it is the one most likely to be repurposed later, and the
+   * failure mode is silent - every sw_timer timeout in the firmware would
+   * scale by the ratio between the two generators.
+   */
+  uint32_t cycles_per_tick = (system_gclk_gen_get_hz(SW_TIMER_GCLK_GENERATOR) / 1000ul)
+                             * SW_TIMER_TICK_MS;
 
   tc_get_config_defaults(&config_tc);
   config_tc.counter_size = TC_COUNTER_SIZE_16BIT;
-  config_tc.clock_source = GCLK_GENERATOR_1;
+  config_tc.clock_source = SW_TIMER_GCLK_GENERATOR;
   config_tc.clock_prescaler = TC_CLOCK_PRESCALER_DIV1;
   config_tc.wave_generation = TC_WAVE_GENERATION_MATCH_FREQ;
   config_tc.counter_16_bit.value = 0;
-  config_tc.counter_16_bit.compare_capture_channel[0] = (uint16_t)cycles_per_ms;
-  config_tc.counter_16_bit.compare_capture_channel[1] = (uint16_t)cycles_per_ms;
+  config_tc.counter_16_bit.compare_capture_channel[0] = (uint16_t)cycles_per_tick;
+  config_tc.counter_16_bit.compare_capture_channel[1] = (uint16_t)cycles_per_tick;
   tc_init(&tc_instance, TC0, &config_tc);
   tc_enable(&tc_instance);
   tc_register_callback(&tc_instance, tc_callback_sw_timer, TC_CALLBACK_CC_CHANNEL0);
