@@ -193,10 +193,27 @@ void bms_interrupt_process(void)
 
       //This needs better handling....
       current_mA = (ccVal * (uint16_t)(8.44f * 4096.0f)) / 4096;
-      #define FILT_MS   (500ul)
-      #define PERIOD_MS (250ul)
-      current_filt_sum_mA += ( (int32_t)((65536.0 * PERIOD_MS) / FILT_MS) * (int16_t)(current_mA - (int16_t)(current_filt_sum_mA >> 16) ) );
-      current_filt_mA = current_filt_sum_mA >> 16;
+
+      /*
+       * First-order IIR:  sum += alpha * (x - sum>>FRAC),  filtered = sum>>FRAC
+       *
+       * This used a Q16 accumulator, which can only represent a filtered
+       * current of +-32767mA before sum overflows int32 - and it truncated
+       * both the input and the feedback term to int16_t on the way in. At
+       * 8.44mA per CC LSB the coulomb counter reaches +-276A, and a vacuum
+       * motor inrush passes 32.7A easily, at which point the difference wraps
+       * and the filter runs away. Q8 leaves 1/256 mA of resolution on the
+       * output - far more than the 8.44mA input step - while keeping the
+       * accumulator and the alpha*delta product inside int32 across the
+       * counter's whole range.
+       */
+      #define FILT_MS         (500ul)
+      #define PERIOD_MS       (250ul)
+      #define FILT_FRAC_BITS  (8)
+      #define FILT_ALPHA      ((int32_t)(((1L << FILT_FRAC_BITS) * (long)PERIOD_MS) / (long)FILT_MS))
+
+      current_filt_sum_mA += FILT_ALPHA * (current_mA - (current_filt_sum_mA >> FILT_FRAC_BITS));
+      current_filt_mA = current_filt_sum_mA >> FILT_FRAC_BITS;
 
       //Ignore tiny values.
       //if ( (ccVal > 0 && ccVal > 2)  || (ccVal < 0 && ccVal < -2) )
@@ -235,7 +252,10 @@ uint16_t bms_get_soc_x100(void)
 {
   uint16_t soc = 100;
   int32_t current_charge_level = eeprom_data.current_charge_level;
-  int16_t total_pack_capacity  = eeprom_data.total_pack_capacity  >> 10;
+  /* int32_t, not int16_t: the scaled capacity is 4218 for this pack but
+     narrowing here silently wraps negative for anything above ~33Ah, which
+     would make the whole SOC calculation fall through to the 1% floor. */
+  int32_t total_pack_capacity  = eeprom_data.total_pack_capacity  >> 10;
 
   if(total_pack_capacity > 0 && current_charge_level > 0)
   {
