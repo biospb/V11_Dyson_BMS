@@ -49,7 +49,9 @@ enum BMS_ERROR_CODE
   BMS_ERR_OVERVOLTAGE,     // 6  BMS IC overvoltage trip
   BMS_ERR_OVERCURRENT,     // 7  BMS IC overcurrent trip
   BMS_ERR_SHORTCIRCUIT,    // 8  BMS IC short circuit trip
-  BMS_ERR_I2C_FAIL,        // 9  Unable to talk to the BQ7693 IC - very bad!
+  BMS_ERR_I2C_FAIL,        // 9  BQ7693 unreachable/corrupt, or the AFE itself
+                           //    reported an internal fault (DEVICE_XREADY) or
+                           //    an external protector pulled ALERT (OVRD_ALERT)
   BMS_ERR_WDT,             // 10 Watchdog early warning fired - main loop stalled!
 };
 

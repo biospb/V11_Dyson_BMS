@@ -52,6 +52,14 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
 // N days = N * 86400 seconds × 1 tick/sec
 #define RTC_STANDBY_WAKE_TICKS  ((uint32_t)2 * (24UL * 60UL * 60UL))
 
+/*
+ * ALERT is the OR of every SYS_STAT bit and EXTINT 8 is configured rising-edge
+ * only, so any latched bit holds the line high and no further edge can ever
+ * arrive. Poll on this interval as well so a latched fault cannot wedge the
+ * interrupt permanently.
+ */
+#define SYS_STAT_POLL_MS        (1000ul)
+
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL TYPES
 -----------------------------------------------------------------------------*/
@@ -75,6 +83,14 @@ static sw_timer bms_timer = 0;
 static int16_t  pack_temperature = 0;
 //volatile: set by the BQ7693 ALERT interrupt, cleared in the main loop.
 static volatile bool process_bms_interrupt = false;
+/*
+ * SYS_STAT has exactly one owner: bms_sys_stat_service(). Any fault bit it
+ * finds is accumulated here and consumed by the safety checks, so clearing the
+ * bit on the chip (which is what lets ALERT de-assert and re-arm) cannot lose
+ * the event.
+ */
+static volatile uint8_t bms_sys_stat_faults = 0;
+static sw_timer bms_sys_stat_timer = 0;
 static volatile bool rtc_wakeup_flag = false;
 static struct rtc_module rtc_instance;
 
@@ -117,6 +133,8 @@ static void    bms_handle_charger_connected(void);
 static void    bms_handle_charger_connected_not_charging(void);
 static void    bms_handle_charging(void);
 static void    bms_handle_charger_unplugged(void);
+static void    bms_sys_stat_service(void);
+static uint8_t bms_sys_stat_take(void);
 static void    bms_enter_standby(void);
 static void    bms_leave_standby(void);
 static void    rtc_standby_timer_init(void);
@@ -181,66 +199,120 @@ void bms_interrupt_process(void)
 {
   uint8_t sys_stat;
 
-  if(true == process_bms_interrupt)
+  /* Serviced on the ALERT edge, and periodically in case the edge can no
+     longer arrive because a fault bit is holding ALERT high. */
+  if ((false == process_bms_interrupt) &&
+      (false == sw_timer_is_elapsed(&bms_sys_stat_timer, SYS_STAT_POLL_MS)))
   {
-    bq7693_read_register(SYS_STAT, 1, &sys_stat);
-
-    if (sys_stat & 0x80)
-    {
-      //Got a coulomb charger count ready.
-      int32_t ccVal = bq7693_read_cc();
-
-      //This needs better handling....
-      current_mA = (ccVal * (uint16_t)(8.44f * 4096.0f)) / 4096;
-
-      /*
-       * First-order IIR:  sum += alpha * (x - sum>>FRAC),  filtered = sum>>FRAC
-       *
-       * This used a Q16 accumulator, which can only represent a filtered
-       * current of +-32767mA before sum overflows int32 - and it truncated
-       * both the input and the feedback term to int16_t on the way in. At
-       * 8.44mA per CC LSB the coulomb counter reaches +-276A, and a vacuum
-       * motor inrush passes 32.7A easily, at which point the difference wraps
-       * and the filter runs away. Q8 leaves 1/256 mA of resolution on the
-       * output - far more than the 8.44mA input step - while keeping the
-       * accumulator and the alpha*delta product inside int32 across the
-       * counter's whole range.
-       */
-      #define FILT_MS         (500ul)
-      #define PERIOD_MS       (250ul)
-      #define FILT_FRAC_BITS  (8)
-      #define FILT_ALPHA      ((int32_t)(((1L << FILT_FRAC_BITS) * (long)PERIOD_MS) / (long)FILT_MS))
-
-      current_filt_sum_mA += FILT_ALPHA * (current_mA - (current_filt_sum_mA >> FILT_FRAC_BITS));
-      current_filt_mA = current_filt_sum_mA >> FILT_FRAC_BITS;
-
-      //Ignore tiny values.
-      //if ( (ccVal > 0 && ccVal > 2)  || (ccVal < 0 && ccVal < -2) )
-      {
-        int32_t cc_uah;
-        //i = V/R
-        //sense resistor = 1mOhm
-        //microV / milliOhms gives current in mA.
-        //so ccVal has current in mA.
-        //Dividing by 14400 would give mAH. (number of 250mS periods in 1 hr.
-        //Dividing by 14.4 will give microAH (what we want)
-        // 14.4 = ((3600 * 1000) / 250ms) / 1000mAh
-        cc_uah = ccVal * (int16_t)(((8.44f * 250.0f * 32768.0f) / (3600.0f)));
-        cc_uah /= 32768;
-        eeprom_data.current_charge_level += cc_uah;
-
-        // Clamp charge level to valid range
-        if (eeprom_data.current_charge_level > eeprom_data.total_pack_capacity)
-          eeprom_data.current_charge_level = eeprom_data.total_pack_capacity;
-        if (eeprom_data.current_charge_level < 0)
-          eeprom_data.current_charge_level = 0;
-      }
-      //Update the CC bit so it'll refire in another 250mS as per datasheet.
-      bq7693_write_register(SYS_STAT, 0x80);//Clear CC bit.
-    }
-
-    process_bms_interrupt = false;
+    return;
   }
+
+  sw_timer_start(&bms_sys_stat_timer);
+  process_bms_interrupt = false;
+
+  if (!bq7693_read_register(SYS_STAT, 1, &sys_stat))
+  {
+    return;
+  }
+
+  /* Latch and clear every fault bit. Clearing is what allows ALERT to fall
+     and the next edge to be seen; the bits are handed to the safety checks
+     through bms_sys_stat_take() so nothing is lost by clearing them here. */
+  if (sys_stat & STAT_FLAGS)
+  {
+    bms_sys_stat_faults |= (uint8_t)(sys_stat & STAT_FLAGS);
+    bq7693_write_register(SYS_STAT, (uint8_t)(sys_stat & STAT_FLAGS));
+    BMS_PRINT("BMS:SYS_STAT=0x%02X\r\n", sys_stat);
+  }
+
+  if (sys_stat & STAT_CC_READY)
+  {
+    //Got a coulomb charger count ready.
+    int32_t ccVal = bq7693_read_cc();
+
+    //This needs better handling....
+    current_mA = (ccVal * (uint16_t)(8.44f * 4096.0f)) / 4096;
+
+    /*
+     * First-order IIR:  sum += alpha * (x - sum>>FRAC),  filtered = sum>>FRAC
+     *
+     * This used a Q16 accumulator, which can only represent a filtered
+     * current of +-32767mA before sum overflows int32 - and it truncated
+     * both the input and the feedback term to int16_t on the way in. At
+     * 8.44mA per CC LSB the coulomb counter reaches +-276A, and a vacuum
+     * motor inrush passes 32.7A easily, at which point the difference wraps
+     * and the filter runs away. Q8 leaves 1/256 mA of resolution on the
+     * output - far more than the 8.44mA input step - while keeping the
+     * accumulator and the alpha*delta product inside int32 across the
+     * counter's whole range.
+     */
+    #define FILT_MS         (500ul)
+    #define PERIOD_MS       (250ul)
+    #define FILT_FRAC_BITS  (8)
+    #define FILT_ALPHA      ((int32_t)(((1L << FILT_FRAC_BITS) * (long)PERIOD_MS) / (long)FILT_MS))
+
+    current_filt_sum_mA += FILT_ALPHA * (current_mA - (current_filt_sum_mA >> FILT_FRAC_BITS));
+    current_filt_mA = current_filt_sum_mA >> FILT_FRAC_BITS;
+
+    //Ignore tiny values.
+    //if ( (ccVal > 0 && ccVal > 2)  || (ccVal < 0 && ccVal < -2) )
+    {
+      int32_t cc_uah;
+      //i = V/R
+      //sense resistor = 1mOhm
+      //microV / milliOhms gives current in mA.
+      //so ccVal has current in mA.
+      //Dividing by 14400 would give mAH. (number of 250mS periods in 1 hr.
+      //Dividing by 14.4 will give microAH (what we want)
+      // 14.4 = ((3600 * 1000) / 250ms) / 1000mAh
+      cc_uah = ccVal * (int16_t)(((8.44f * 250.0f * 32768.0f) / (3600.0f)));
+      cc_uah /= 32768;
+      eeprom_data.current_charge_level += cc_uah;
+
+      // Clamp charge level to valid range
+      if (eeprom_data.current_charge_level > eeprom_data.total_pack_capacity)
+        eeprom_data.current_charge_level = eeprom_data.total_pack_capacity;
+      if (eeprom_data.current_charge_level < 0)
+        eeprom_data.current_charge_level = 0;
+    }
+    //Update the CC bit so it'll refire in another 250mS as per datasheet.
+    bq7693_write_register(SYS_STAT, STAT_CC_READY);//Clear CC bit.
+  }
+}
+
+/**
+ * @brief Read SYS_STAT, latch any fault bits and clear them on the chip.
+ *
+ * Called by the safety checks so that a fault which arrived since the last
+ * service is picked up immediately rather than waiting for the next poll.
+ */
+static void bms_sys_stat_service(void)
+{
+  uint8_t sys_stat;
+
+  if (!bq7693_read_register(SYS_STAT, 1, &sys_stat))
+  {
+    return;
+  }
+
+  if (sys_stat & STAT_FLAGS)
+  {
+    bms_sys_stat_faults |= (uint8_t)(sys_stat & STAT_FLAGS);
+    bq7693_write_register(SYS_STAT, (uint8_t)(sys_stat & STAT_FLAGS));
+  }
+}
+
+/** @brief Return every fault bit seen since the last call, and clear the latch. */
+static uint8_t bms_sys_stat_take(void)
+{
+  uint8_t faults;
+
+  system_interrupt_enter_critical_section();
+  faults = bms_sys_stat_faults;
+  bms_sys_stat_faults = 0u;
+  system_interrupt_leave_critical_section();
+
+  return faults;
 }
 
 /**
@@ -777,14 +849,14 @@ static bool bms_is_safe_to_discharge(void)
     BMS_PRINT("%s: Pack undertemp %d 'C, min %d\r\n", __FUNCTION__ , temp, MIN_PACK_DISCHARGE_TEMP);
   }
 
-  //Check sys_stat — read once, clear all fault flags, then evaluate.
-  uint8_t sys_stat;
-  bq7693_read_register(SYS_STAT, 1, &sys_stat);
+  //Pick up anything that arrived since the last service, then evaluate every
+  //fault bit latched since the previous safety check.
+  bms_sys_stat_service();
+  uint8_t sys_stat = bms_sys_stat_take();
 
-  if (sys_stat & STAT_FLAGS)
+  if (sys_stat != 0u)
   {
-    BMS_PRINT("%s: SYS_STAT=0x%02X\r\n", __FUNCTION__, sys_stat);
-    bq7693_write_register(SYS_STAT, sys_stat & STAT_FLAGS);
+    BMS_PRINT("%s: SYS_STAT faults=0x%02X\r\n", __FUNCTION__, sys_stat);
   }
 
   if (sys_stat & STAT_OCD)
@@ -806,6 +878,20 @@ static bool bms_is_safe_to_discharge(void)
   {
     bms_set_error(BMS_ERR_OVERVOLTAGE);
     BMS_PRINT("%s: BMS IC Overvoltage Trip\r\n", __FUNCTION__);
+  }
+  if (sys_stat & STAT_DEVICE_XREADY)
+  {
+    /* Internal AFE fault. The chip turns both FET drivers off and clears
+       CELLBAL1/2/3 by itself, so this must not be cleared and forgotten. */
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    BMS_PRINT("%s: BQ7693 DEVICE_XREADY\r\n", __FUNCTION__);
+  }
+  if (sys_stat & STAT_OVRD_ALERT)
+  {
+    /* Something external drove ALERT high - on a pack like this that means a
+       secondary protector fired. The AFE disables both FETs in response. */
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    BMS_PRINT("%s: BQ7693 OVRD_ALERT (external protector)\r\n", __FUNCTION__);
   }
 
   /* Checked last: if the bus failed, everything decided above was decided on
@@ -857,26 +943,43 @@ static bool bms_is_safe_to_charge(void)
     bms_set_error(BMS_ERR_PACK_UNDERTEMP);
   }
 
-  //Check sys_stat — read once, clear all fault flags, then evaluate.
-  uint8_t sys_stat;
-  bq7693_read_register(SYS_STAT, 1, &sys_stat);
+  //Pick up anything that arrived since the last service, then evaluate every
+  //fault bit latched since the previous safety check.
+  bms_sys_stat_service();
+  uint8_t sys_stat = bms_sys_stat_take();
 
-  if (sys_stat & STAT_FLAGS)
+  if (sys_stat != 0u)
   {
-    BMS_PRINT("%s: SYS_STAT=0x%02X\r\n", __FUNCTION__, sys_stat);
-    bq7693_write_register(SYS_STAT, sys_stat & STAT_FLAGS);
+    BMS_PRINT("%s: SYS_STAT faults=0x%02X\r\n", __FUNCTION__, sys_stat);
   }
 
   if (sys_stat & STAT_OCD)
   {
     bms_set_error(BMS_ERR_OVERCURRENT);
-    bq7693_write_register(SYS_STAT, 0x01);
   }
-
+  if (sys_stat & STAT_SCD)
+  {
+    /* was not checked on the charge path at all */
+    bms_set_error(BMS_ERR_SHORTCIRCUIT);
+  }
+  if (sys_stat & STAT_UV)
+  {
+    /* likewise - charging into a pack the AFE has declared undervolt */
+    bms_set_error(BMS_ERR_UNDERVOLTAGE);
+  }
   if (sys_stat & STAT_OV)
   {
     bms_set_error(BMS_ERR_OVERVOLTAGE);
-    bq7693_write_register(SYS_STAT, 0x04);
+  }
+  if (sys_stat & STAT_DEVICE_XREADY)
+  {
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    BMS_PRINT("%s: BQ7693 DEVICE_XREADY\r\n", __FUNCTION__);
+  }
+  if (sys_stat & STAT_OVRD_ALERT)
+  {
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    BMS_PRINT("%s: BQ7693 OVRD_ALERT (external protector)\r\n", __FUNCTION__);
   }
 
   /* Checked last: if the bus failed, everything decided above was decided on
