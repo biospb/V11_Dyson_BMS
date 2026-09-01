@@ -27,6 +27,14 @@ void bq7693_init(void);
 bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf);
 bool bq7693_write_register(uint8_t addr, uint8_t data);
 
+/*
+ * Sticky I2C health flag. Rather than checking a return value at each of the
+ * ~50 call sites, every failed transfer latches an error here; the safety
+ * checks clear it before their reads and test it afterwards.
+ */
+void bq7693_comm_clear_error(void);
+bool bq7693_comm_healthy(void);
+
 uint16_t* bq7693_get_cell_voltages(void);
 int bq7693_get_pack_voltage(void);
 void bq7693_enable_charge(void);

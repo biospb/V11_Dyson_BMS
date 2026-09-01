@@ -18,6 +18,9 @@ uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t data);
 
 uint16_t bq7693_cell_voltages[7];
 
+/* Cleared by bq7693_comm_clear_error(), latched false by any failed transfer. */
+static volatile bool bq7693_comm_ok = true;
+
 volatile int bq7693_adc_gain = 0;   // in uV/LSB
 volatile int8_t bq7693_adc_offset = 0; //in mV
 
@@ -140,6 +143,9 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
     /* Increment timeout counter and check if timed out. */
     if (timeout++ >= BQ7693_TIMEOUT)
     {
+      /* The register address never landed, so whatever the read phase
+         returns is meaningless - this used to fall through as success. */
+      result = false;
       break;
     }
   }
@@ -156,6 +162,11 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
       result = false;
       break;
     }
+  }
+
+  if (!result)
+  {
+    bq7693_comm_ok = false;
   }
 
   system_interrupt_enable(SYSTEM_INTERRUPT_MODULE_EIC);
@@ -205,8 +216,26 @@ bool bq7693_write_register(uint8_t addr, uint8_t value)
       break;
     }
   }
+
+  if (!result)
+  {
+    bq7693_comm_ok = false;
+  }
+
   system_interrupt_enable(SYSTEM_INTERRUPT_MODULE_EIC);
   return result;
+}
+
+/** @brief Clear the sticky I2C error latch before a batch of transfers. */
+void bq7693_comm_clear_error(void)
+{
+  bq7693_comm_ok = true;
+}
+
+/** @brief False if any transfer since the last clear failed. */
+bool bq7693_comm_healthy(void)
+{
+  return bq7693_comm_ok;
 }
 
 /**
@@ -305,7 +334,14 @@ uint16_t *bq7693_get_cell_voltages(void)
   for (int i=0; i< 7; ++i)
   {
     //Because CRC is enabled, we need to read 3 bytes (VCx_HI, the CRC byte (ignore), then VCx_Lo)
-    bq7693_read_register((VC1_HI_BYTE + 2*cellsToRead[i]), 3, scratch);
+    if (!bq7693_read_register((VC1_HI_BYTE + 2*cellsToRead[i]), 3, scratch))
+    {
+      /* scratch[] is a stack local - using it here would report whatever
+         happened to be on the stack as a cell voltage. Report 0mV instead,
+         which fails every safety check, and leave the comm error latched. */
+      bq7693_cell_voltages[i] = 0;
+      continue;
+    }
     tempval = ((scratch[0] & 0x3F) <<8) | scratch[2];
     bq7693_cell_voltages[i] = tempval * bq7693_adc_gain/1000 + bq7693_adc_offset;
   }
@@ -322,7 +358,10 @@ int bq7693_get_pack_voltage(void)
 {
   uint8_t scratch[3];
   uint16_t tempval;
-  bq7693_read_register(BAT_HI_BYTE, 3, scratch);
+  if (!bq7693_read_register(BAT_HI_BYTE, 3, scratch))
+  {
+    return 0;
+  }
   tempval = scratch[0] <<8 | scratch[2];
   int bq7693_pack_voltage = 4 * bq7693_adc_gain * tempval / 1000 + ( 7 * bq7693_adc_offset);
   return bq7693_pack_voltage;
@@ -547,7 +586,10 @@ int16_t bq7693_read_cc(void)
   int16_t tempCC;
 
   uint8_t scratch[3];
-  bq7693_read_register(CC_HI_BYTE, 3, scratch);
+  if (!bq7693_read_register(CC_HI_BYTE, 3, scratch))
+  {
+    return 0;
+  }
   tempCC =  ((scratch[0])<<8);
   tempCC |= scratch[2]; //ignore the unwanted CRC byte.
 

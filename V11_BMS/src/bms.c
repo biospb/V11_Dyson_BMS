@@ -750,6 +750,7 @@ static bool bms_is_safe_to_discharge(void)
 {
   //Clear error status.
   bms_error = BMS_ERR_NONE;
+  bq7693_comm_clear_error();
 
   uint16_t *cell_voltages = bq7693_get_cell_voltages();
   //Check any cells undervolt.
@@ -807,6 +808,14 @@ static bool bms_is_safe_to_discharge(void)
     BMS_PRINT("%s: BMS IC Overvoltage Trip\r\n", __FUNCTION__);
   }
 
+  /* Checked last: if the bus failed, everything decided above was decided on
+     data we never actually received. BMS_ERR_I2C_FAIL outranks the rest. */
+  if (!bq7693_comm_healthy())
+  {
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    BMS_PRINT("%s: BQ7693 I2C failure\r\n", __FUNCTION__);
+  }
+
   if (bms_error == BMS_ERR_NONE)
     return true;
   else
@@ -821,6 +830,7 @@ static bool bms_is_safe_to_charge(void)
 {
   //Clear error status.
   bms_error = BMS_ERR_NONE;
+  bq7693_comm_clear_error();
 
   uint16_t *cell_voltages = bq7693_get_cell_voltages();
 
@@ -867,6 +877,14 @@ static bool bms_is_safe_to_charge(void)
   {
     bms_set_error(BMS_ERR_OVERVOLTAGE);
     bq7693_write_register(SYS_STAT, 0x04);
+  }
+
+  /* Checked last: if the bus failed, everything decided above was decided on
+     data we never actually received. BMS_ERR_I2C_FAIL outranks the rest. */
+  if (!bq7693_comm_healthy())
+  {
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    BMS_PRINT("%s: BQ7693 I2C failure\r\n", __FUNCTION__);
   }
 
   if (bms_error == BMS_ERR_NONE)
