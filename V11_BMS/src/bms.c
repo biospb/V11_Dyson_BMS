@@ -626,7 +626,7 @@ static bool bms_is_safe_to_charge(void)
   pack_temperature = bms_read_temperature();
   int temp = pack_temperature / 10;
 
-  if (temp  > MAX_PACK_TEMPERATURE)
+  if (temp >= MAX_PACK_CHARGE_TEMP || temp >= MAX_PACK_TEMPERATURE)
   {
     bms_set_error(BMS_ERR_PACK_OVERTEMP);
   }

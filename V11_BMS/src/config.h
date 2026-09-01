@@ -40,8 +40,9 @@
 
 //18650 cell temperature limits from Molicell datasheet.
 #define MAX_PACK_TEMPERATURE                60       //'C - if pack temperature greater than this, no charge/discharge allowed.
+#define MAX_PACK_CHARGE_TEMP                40       //'C - if pack temperature greater than this, no charge allowed.
 #define MIN_PACK_CHARGE_TEMP                0        //'C - if less than this, no charge.
-#define MIN_PACK_DISCHARGE_TEMP             -40      //'C - if less than this, no discharge
+#define MIN_PACK_DISCHARGE_TEMP             -10      //'C - if less than this, no discharge
 // Limits disabled, as V15 & V11 have 2xRTDs, now unknown where are assigned, therefore even max temp doesnt work
 // Do not charge battery when hot and not supervised! This is for Debug only for V15, battery pack outputs 24V
 
