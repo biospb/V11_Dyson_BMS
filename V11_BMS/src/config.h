@@ -29,7 +29,12 @@
 #define MODE_BUTTON_PULLUP_ENABLE_PIN       PIN_PA18
 #define PRECHARGE_PIN                       PIN_PA24
 
-#define PACK_MAX_CAPACITY_MAH               3600
+// Nominal cell capacity, in mAh. The pack is 7S1P so this is the capacity of a
+// single cell, not the sum. Set it to what is actually fitted: it bounds what
+// the coulomb counter is allowed to learn, seeds the defaults, clamps the
+// runtime estimate, and is reported to the cleaner as the full-charge capacity.
+// Original Dyson V11 cells are 3600mAh; repacked cells are often larger.
+#define PACK_MAX_CAPACITY_MAH               4500
 #define CELL_LOWEST_DISCHARGE_VOLTAGE       2500  //mV - wont allow pack to discharge if any cells lower than this
 #define CELL_LOWEST_CHARGE_VOLTAGE          2000    //mV - won't try to charge the pack if any cells lower than this
 #define CELL_FULL_CHARGE_VOLTAGE            4170    //mV - fully charged cell voltage. Original BMS serial log shows cells charging to 4.17V.
@@ -48,7 +53,21 @@
 
 #define IDLE_TIME                           60 * 30 // Idle time in seconds. Pack will go into SHIP/deep sleep mode if nothing happens in this duration
 
+// How long BMS_FAULT keeps blinking its error code before giving up and going
+// to SHIP mode. Without this the fault state loops forever - which for
+// BMS_ERR_PACK_DISCHARGED means an already-empty pack sits there running the
+// LEDs and discharging itself further. Long enough to read the blink count.
+#define FAULT_DISPLAY_TIME                  60 * 5  // seconds
+
 #define FULL_CHARGE_PAUSE_COUNT             3 //Once a cell reaches max charge volts, pause for 30 seconds and retry, this many times.
+
+// How much the charge level may drift before sleep bothers to rewrite the
+// emulated EEPROM. Anything below this is discarded rather than deferred -
+// SHIP mode loses RAM, so the stored value is what the next boot starts from.
+// At a ~20A draw 10mAh is about 1.8s of running, so a trigger pull shorter
+// than that, followed by a sleep, will not be recorded. Set to 0 to store
+// every change exactly.
+#define EEPROM_CHARGE_TOLERANCE_UAH         (10 * 1000ul)   // 10mAh
 
 #define SERIAL_DEBUG                        1 //Serial debug via the spare USART on the programming pins header
 #define PROT_DEBUG_PRINT                    1

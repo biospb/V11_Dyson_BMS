@@ -21,7 +21,6 @@
 /*-----------------------------------------------------------------------------
     DEFINITION OF GLOBAL VARIABLES
 -----------------------------------------------------------------------------*/
-volatile bool     force_sleep = false;
 
 /*-----------------------------------------------------------------------------
     DEFINITION OF GLOBAL CONSTANTS
@@ -369,9 +368,11 @@ uint32_t bms_get_runtime_seconds(void)
   if(    bms_state == BMS_VACUUM_RUNNING // estimate only while the motor is actually running
       && current_filt_mA_abs > 1000)     // and current is > 1A, to keep the result bounded
   {
-    // clamp to [0, PACK_MAX_CAPACITY_MAH * 1000]
+    /* clamp to [0, PACK_CAPACITY_UPPER_BOUND_UAH] - the same bound the coulomb
+       counter is allowed to reach. Clamping at the nominal figure instead cut
+       the runtime estimate short for any pack that learned above nominal. */
     current_charge_level = eeprom_data.current_charge_level < 0 ? 0
-                         : eeprom_data.current_charge_level > (PACK_MAX_CAPACITY_MAH * 1000) ? (PACK_MAX_CAPACITY_MAH * 1000)
+                         : eeprom_data.current_charge_level > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH ? (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH
                          : eeprom_data.current_charge_level;
 
     runtime = ((current_charge_level / current_filt_mA_abs) * (uint16_t)((3600.0f / 1000.0f) * 1024.0f)) >> 10;
@@ -1110,8 +1111,6 @@ static void bms_handle_idle(void)
         return;
       }
     }
-    else if(force_sleep == true)
-      sw_timer_stop(&bms_timer); // go to sleep
     else if(dsn_prot_get_sleep_flag() == true)
       sw_timer_stop(&bms_timer); // go to sleep requested by cleaner
 
@@ -1144,8 +1143,21 @@ static void bms_handle_sleep(void)
 
   delay_ms(1000);
 
-  //Store pack charge data to eeprom
-  eeprom_write();
+  /*
+   * The single automatic commit point. SHIP mode turns off the BQ7693's
+   * REGOUT, so the MCU loses power here and RAM with it - everything the
+   * coulomb counter has accumulated has to land in the emulated EEPROM
+   * before bq7693_enter_sleep_mode() below. Every state that can shut the
+   * pack down routes through here.
+   */
+  if (eeprom_write() == 0)
+  {
+    serial_debug_send_message("BMS:EEPROM_WRITTEN\r\n");
+  }
+  else
+  {
+    serial_debug_send_message("BMS:EEPROM_UNCHANGED\r\n");
+  }
 
   bq7693_enter_sleep_mode();
 
@@ -1230,9 +1242,13 @@ static void bms_handle_fault(void)
                           || original_error == BMS_ERR_OVERCURRENT
                           || original_error == BMS_ERR_SHORTCIRCUIT);
   sw_timer retry_timer = 0;
+  sw_timer fault_timer = 0;
 
   BMS_PRINT("BMS:FAULT err=%d auto_recover=%d\r\n", original_error, auto_recover);
-  eeprom_write();
+
+  /* No eeprom_write() here. bms_handle_sleep() is the single commit point,
+     and this state can now reach it via the display timeout below. */
+  sw_timer_start(&fault_timer);
 
   leds_off();
   dsn_prot_set_trigger(false);
@@ -1267,6 +1283,16 @@ static void bms_handle_fault(void)
     if (dio_read(DIO_CHARGER_CONNECTED))
     {
       bms_state = BMS_CHARGER_CONNECTED;
+      return;
+    }
+
+    if (sw_timer_is_elapsed(&fault_timer, (uint32_t)FAULT_DISPLAY_TIME * 1000ul))
+    {
+      /* The user has had long enough to read the code. Shut the pack down
+         rather than blinking forever - which on a flat pack means draining
+         it further - and let bms_handle_sleep() commit the charge level. */
+      BMS_PRINT("BMS:FAULT display timeout, sleeping\r\n");
+      bms_state = BMS_SLEEP;
       return;
     }
 

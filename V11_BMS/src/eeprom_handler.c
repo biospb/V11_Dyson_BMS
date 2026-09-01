@@ -9,12 +9,28 @@
 #include "eeprom_handler.h"
 volatile struct eeprom_data eeprom_data;
 
+/*
+ * Copy of what is actually stored in the emulated EEPROM, so eeprom_write()
+ * can skip the flash erase when nothing has changed. Populated by a
+ * successful eeprom_read() and by every real write; until then it is invalid
+ * and a write always goes through.
+ */
+static struct eeprom_data eeprom_shadow;
+static bool eeprom_shadow_valid = false;
+
 /**
  * @brief Write factory default values to EEPROM (capacity reset).
  */
 void eeprom_write_defaults(void)
 {
-  eeprom_data.total_pack_capacity      = (PACK_MAX_CAPACITY_MAH       * 1200ul);  //in micro-amp-hours
+  /*
+   * Start at nominal, not 120% of it. The 120% seed only made sense while the
+   * learning filter was decay-only and had to converge downward; now that a
+   * full discharge-to-charge cycle can correct the estimate upward too, an
+   * optimistic seed just means the gauge over-reads until the first full
+   * cycle completes.
+   */
+  eeprom_data.total_pack_capacity      = (PACK_MAX_CAPACITY_MAH       * 1000ul);  //in micro-amp-hours
   eeprom_data.current_charge_level     = ((PACK_MAX_CAPACITY_MAH / 2) * 1000ul);
   eeprom_data.full_discharge_seen      = 0;
   eeprom_write();
@@ -79,18 +95,66 @@ int eeprom_read(void)
   uint32_t calc = calc_crc32((const uint8_t *)&eeprom_data,
       sizeof(eeprom_data) - sizeof(eeprom_data.crc32));
   if (calc != eeprom_data.crc32) {
+    eeprom_shadow_valid = false;
     return -1;  //CRC mismatch - data corrupted
   }
+
+  //What we just read is, by definition, what is stored.
+  eeprom_shadow.total_pack_capacity  = eeprom_data.total_pack_capacity;
+  eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
+  eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
+  eeprom_shadow_valid = true;
   return 0;
 }
 
 /**
- * @brief Compute CRC32 and write EEPROM page.
+ * @brief Compute CRC32 and write the EEPROM page, unless it is already current.
  *
- * @return 0 on success.
+ * @return 0 if the page was written, 1 if the stored values were identical.
  */
 int eeprom_write(void)
 {
+  /*
+   * Skip the write when nothing worth storing has changed.
+   *
+   * The charge level gets a tolerance (EEPROM_CHARGE_TOLERANCE_UAH); the
+   * capacity and the full-discharge marker do not, because they change rarely
+   * and losing one costs a whole learning cycle.
+   *
+   * Note what the tolerance actually costs. SHIP mode loses RAM, so the shadow
+   * is re-established from flash on every boot: a skipped delta is discarded
+   * permanently, not deferred to the next write. Discharge only goes one way,
+   * so repeated sessions that each land under the threshold accumulate error
+   * without bound - the gauge drifts high by up to the tolerance per
+   * sleep cycle. At 10mAh and a ~20A draw that is roughly 1.8s of running per
+   * cycle, which is why the threshold wants to stay small. Set it to 0 for an
+   * exact compare.
+   *
+   * Even at 0 the skip still fires often: with the FETs off and no load the
+   * coulomb counter sits at 0-1 LSB, and cc_uah = ccVal * 19203 / 32768
+   * integer divides to zero for |ccVal| <= 1, so a pack that wakes, sees
+   * nothing and sleeps again 20s later has a bit-identical charge level.
+   *
+   * Comparing fields rather than memcmp() also sidesteps the three padding
+   * bytes the struct carries before crc32.
+   */
+  if (eeprom_shadow_valid
+      && (eeprom_data.total_pack_capacity == eeprom_shadow.total_pack_capacity)
+      && (eeprom_data.full_discharge_seen == eeprom_shadow.full_discharge_seen))
+  {
+    int32_t drift = eeprom_data.current_charge_level - eeprom_shadow.current_charge_level;
+
+    if (drift < 0)
+    {
+      drift = -drift;
+    }
+
+    if (drift <= (int32_t)EEPROM_CHARGE_TOLERANCE_UAH)
+    {
+      return 1;   //nothing worth a flash erase
+    }
+  }
+
   //Compute CRC over data fields (everything before the crc32 field)
   eeprom_data.crc32 = calc_crc32((const uint8_t *)&eeprom_data,
       sizeof(eeprom_data) - sizeof(eeprom_data.crc32));
@@ -99,7 +163,12 @@ int eeprom_write(void)
   memcpy(buffer, (const void*)&eeprom_data, sizeof(eeprom_data));
   eeprom_emulator_write_page(0, buffer);
   eeprom_emulator_commit_page_buffer();
-  return 0;
+
+  eeprom_shadow.total_pack_capacity  = eeprom_data.total_pack_capacity;
+  eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
+  eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
+  eeprom_shadow_valid = true;
+  return 0;   //written
 }
 
 /**

@@ -12,8 +12,6 @@
 void bq7693_i2c_init(void);
 
 //"internal" function primitives
-int bq7693_read_block(uint8_t start_addr, size_t len, uint8_t* buf);
-int bq7693_write_block(uint8_t start_addr, size_t len, uint8_t *buf);
 uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t data);
 
 uint16_t bq7693_cell_voltages[7];

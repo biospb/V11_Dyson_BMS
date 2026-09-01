@@ -33,7 +33,7 @@ struct eeprom_data
 
 extern int eeprom_init(void);
 extern int eeprom_read(void);
-extern int eeprom_write(void);
+extern int eeprom_write(void);   /* 0 = written, 1 = skipped (unchanged) */
 extern int eeprom_fuses_set(void);
 extern void eeprom_write_defaults(void);
 
