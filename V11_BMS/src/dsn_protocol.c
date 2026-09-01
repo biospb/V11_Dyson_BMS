@@ -548,7 +548,9 @@ static uint8_t frame_stuff(uint8_t *buf, uint8_t frame_len, uint8_t buf_size)
   uint8_t total;
   uint8_t dst;
   uint8_t i;
-  int8_t  src;
+  /* must be signed AND wider than uint8_t: frame_len reaches 131 for a
+     maximum-length response, and the reverse copy below runs down to -1 */
+  int16_t src;
 
   if (frame_len < 2)
     return 0;

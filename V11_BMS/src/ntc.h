@@ -32,6 +32,9 @@
 /*-----------------------------------------------------------------------------
   DECLARATION OF GLOBAL FUNCTIONS
 -----------------------------------------------------------------------------*/
+/* Number of interpolation points in NTC_table[] */
+#define NTC_TABLE_ENTRIES   129
+
 extern int16_t NTC_ADC2Temperature(uint16_t adc_value);
 
 /*-----------------------------------------------------------------------------
