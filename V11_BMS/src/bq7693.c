@@ -321,12 +321,21 @@ uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t inData)
 void bq7693_enable_charge(void)
 {
   uint8_t scratch;
-  //Clear any bits in the SYS_STAT error register
-  bq7693_read_register(SYS_STAT, 1, &scratch);
-  bq7693_write_register(SYS_STAT, scratch); //Explicitly clear any set bits in the SYS_STAT register by writing them back.
-
   uint8_t ctrl2;
-  bq7693_read_register(SYS_CTRL2, 1, &ctrl2);
+
+  //Clear any bits in the SYS_STAT error register
+  if (bq7693_read_register(SYS_STAT, 1, &scratch))
+  {
+    bq7693_write_register(SYS_STAT, scratch); //Explicitly clear any set bits in the SYS_STAT register by writing them back.
+  }
+
+  /* Refuse to turn a FET on when the current register state is unknown - the
+     read-modify-write below would otherwise be modifying stack garbage. */
+  if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
+  {
+    return;
+  }
+
   bq7693_write_register(SYS_CTRL2, ctrl2 | SYS_CTRL2_CC_EN | SYS_CTRL2_CHG_ON);
 }
 
@@ -334,7 +343,18 @@ void bq7693_enable_charge(void)
 void bq7693_disable_charge(void)
 {
   uint8_t ctrl2;
-  bq7693_read_register(SYS_CTRL2, 1, &ctrl2);
+
+  /* A disable must not silently do nothing, so if the register cannot be read
+     fall back to the known-safe value rather than skipping the write or
+     modifying stack garbage: both FETs off, coulomb counter still running.
+     Losing DSG as collateral is acceptable - the bus is failing, and
+     BMS_ERR_I2C_FAIL is already latched by the failed read. */
+  if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
+  {
+    bq7693_write_register(SYS_CTRL2, SYS_CTRL2_CC_EN);
+    return;
+  }
+
   bq7693_write_register(SYS_CTRL2, ctrl2 & ~SYS_CTRL2_CHG_ON);
 }
 
@@ -347,12 +367,21 @@ void bq7693_enable_discharge(void)
   bq7693_write_register(PROTECT2, 0x04);
 
   uint8_t scratch;
-  bq7693_read_register(SYS_STAT, 1, &scratch);
-  bq7693_write_register(SYS_STAT, scratch); //Explicitly clear any set bits in the SYS_STAT register by writing them back.
+  uint8_t ctrl2;
+
+  if (bq7693_read_register(SYS_STAT, 1, &scratch))
+  {
+    bq7693_write_register(SYS_STAT, scratch); //Explicitly clear any set bits in the SYS_STAT register by writing them back.
+  }
 
   //DSG_ON turns the discharge FET on. Preserve CHG_ON so charging is not affected.
-  uint8_t ctrl2;
-  bq7693_read_register(SYS_CTRL2, 1, &ctrl2);
+  /* As in bq7693_enable_charge(): never turn a FET on from an unknown state. */
+  if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
+  {
+    bq7693_write_register(PROTECT1, 0x82);   //restore the normal SCD threshold
+    return;
+  }
+
   bq7693_write_register(SYS_CTRL2, ctrl2 | SYS_CTRL2_CC_EN | SYS_CTRL2_DSG_ON);
 
   bq7693_write_register(PROTECT2, 0x04);
@@ -363,7 +392,15 @@ void bq7693_enable_discharge(void)
 void bq7693_disable_discharge(void)
 {
   uint8_t ctrl2;
-  bq7693_read_register(SYS_CTRL2, 1, &ctrl2);
+
+  /* See bq7693_disable_charge() - a failed disable falls back to both FETs
+     off rather than doing nothing. */
+  if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
+  {
+    bq7693_write_register(SYS_CTRL2, SYS_CTRL2_CC_EN);
+    return;
+  }
+
   bq7693_write_register(SYS_CTRL2, ctrl2 & ~SYS_CTRL2_DSG_ON);
 }
 
