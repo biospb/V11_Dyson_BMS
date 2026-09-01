@@ -61,9 +61,11 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
     DEFINITION OF LOCAL VARIABLES
 -----------------------------------------------------------------------------*/
 //We start off idle.
-static enum BMS_STATE bms_state      = BMS_INIT;
+//volatile: bms_force_fault() writes both of these from the watchdog
+//early-warning interrupt, and the state machine reads them in the main loop.
+static volatile enum BMS_STATE bms_state      = BMS_INIT;
 //If a fault occurs, it'll be lodged here.
-static enum BMS_ERROR_CODE bms_error = BMS_ERR_NONE;
+static volatile enum BMS_ERROR_CODE bms_error = BMS_ERR_NONE;
 
 static int32_t current_mA = 0;
 static int32_t current_filt_sum_mA = 0;
@@ -72,7 +74,8 @@ static int32_t current_filt_mA = 0;
 static uint16_t charge_pause_counter = 0;
 static sw_timer bms_timer = 0;
 static int16_t  pack_temperature = 0;
-static bool process_bms_interrupt = false;
+//volatile: set by the BQ7693 ALERT interrupt, cleared in the main loop.
+static volatile bool process_bms_interrupt = false;
 static volatile bool rtc_wakeup_flag = false;
 static struct rtc_module rtc_instance;
 
