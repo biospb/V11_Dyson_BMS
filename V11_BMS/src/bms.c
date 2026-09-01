@@ -1140,8 +1140,19 @@ static void bms_handle_sleep(void)
 
   bq7693_enter_sleep_mode();
 
-  //We are about to get powered down.
-  while(1);
+  /*
+   * We are about to get powered down - but only if SHIP mode actually removes
+   * power. If it does not (charger still attached, BOOT held, or the write
+   * simply did not land) this used to spin forever with the watchdog
+   * deinitialised, leaving the pack bricked until the cells were physically
+   * disturbed. Re-arm the watchdog and stop kicking it, so an unexpected
+   * survival resets us back through bms_init() instead.
+   */
+  bms_wdt_init();
+  while(1)
+  {
+    /* deliberately no wdt_reset_count() here */
+  }
 }
 
 /** @brief Vacuum running: monitor safety while trigger held and vacuum connected. */

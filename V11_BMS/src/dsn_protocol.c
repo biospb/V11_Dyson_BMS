@@ -1068,7 +1068,16 @@ static void handle_sleep(void)
   bq7693_disable_discharge();
   port_pin_set_output_level(PRECHARGE_PIN, false);
   port_pin_set_output_level(MODE_BUTTON_PULLUP_ENABLE_PIN, false);
-  delay_ms(300);
+  /*
+   * sw_timer_delay_ms, not the ASF delay_ms: this runs from
+   * dsn_prot_mainloop(), which is itself called from SW_TIMER_SERVICES().
+   * The ASF systick spin does not pump the services, so it does not kick the
+   * watchdog either. bms_wdt_mainloop() kicks every 250ms and the early
+   * warning fires at 512 clocks of a 1024Hz clock = 500ms, so a 300ms block
+   * arriving 250ms after the last kick reaches 550ms and trips
+   * bms_force_fault(BMS_ERR_WDT) on a perfectly healthy system.
+   */
+  sw_timer_delay_ms(300);
   dsn_state = DSN_SLEEP;
   DSN_PRINT("PROT:SLEEP\r\n");
 }
