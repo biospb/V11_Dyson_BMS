@@ -133,6 +133,7 @@ static void    bms_handle_charger_connected(void);
 static void    bms_handle_charger_connected_not_charging(void);
 static void    bms_handle_charging(void);
 static void    bms_handle_charger_unplugged(void);
+static bool    bms_fault_pending(void);
 static void    bms_sys_stat_service(void);
 static uint8_t bms_sys_stat_take(void);
 static void    bms_enter_standby(void);
@@ -672,6 +673,19 @@ void bms_force_fault(enum BMS_ERROR_CODE code)
   bms_state = BMS_FAULT;
 }
 
+/**
+ * @brief True if something outside the current handler has demanded a fault.
+ *
+ * bms_force_fault() is called from the watchdog early-warning interrupt, but
+ * every state handler runs its own while(1) and none of them re-read
+ * bms_state, so the demand used to be overwritten and lost when the handler
+ * eventually returned. The long-running loops poll this and bail out.
+ */
+static bool bms_fault_pending(void)
+{
+  return (bms_state == BMS_FAULT);
+}
+
 /** @brief Configure GPIO pins for charge control, sense inputs, and precharge. */
 static void pins_init(void)
 {
@@ -1039,15 +1053,34 @@ static void bms_handle_idle(void)
       if (bms_is_safe_to_discharge())
       {
         sw_timer_delay_ms(300);
-        bq7693_enable_discharge();
+        /* the 300ms above pumps dsn_prot_mainloop(), which can time the
+           session out underneath us - do not arm the FET for a vacuum that
+           has since gone away */
+        if (dsn_prot_get_vacuum_connected())
+        {
+          bq7693_enable_discharge();
+          /* only now is the edge really consumed; if the check failed we
+             leave vacuum_was_connected clear so the next pass retries,
+             rather than never arming discharge again for this idle stay */
+          vacuum_was_connected = true;
+        }
       }
     }
-    vacuum_was_connected = vacuum_connected;
+    else
+    {
+      vacuum_was_connected = vacuum_connected;
+    }
 
     if(true == vacuum_connected)
       sleep_time = (IDLE_TIME * 1000ul);
     else
       sleep_time = (20 * 1000ul); // 20 sec
+
+    if (bms_fault_pending())
+    {
+      /* raised from interrupt context - honour it instead of overwriting it */
+      return;
+    }
 
     if (dio_read(DIO_CHARGER_CONNECTED) == true)
     {
@@ -1135,6 +1168,15 @@ static void bms_handle_vacuum_running(void)
     {
       dsn_prot_set_trigger(false);
       bms_state = BMS_FAULT;
+      return;
+    }
+
+    if (bms_fault_pending())
+    {
+      /* raised from interrupt context - honour it instead of overwriting it */
+      dsn_prot_set_trigger(false);
+      bq7693_disable_discharge();
+      leds_off();
       return;
     }
 
@@ -1273,6 +1315,14 @@ static void bms_handle_charger_connected_not_charging(void)
 
   while(1)
   {
+    if (bms_fault_pending())
+    {
+      /* raised from interrupt context - honour it instead of overwriting it */
+      bms_balance_stop();
+      leds_off();
+      return;
+    }
+
     if (!dio_read(DIO_CHARGER_CONNECTED))
     {
       bms_balance_stop();
@@ -1429,6 +1479,16 @@ static void bms_handle_charging(void)
       {
         trigger_push_count = 0;
       }
+    }
+
+    if (bms_fault_pending())
+    {
+      /* raised from interrupt context - honour it instead of overwriting it */
+      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+      bq7693_disable_charge();
+      bms_balance_stop();
+      leds_off();
+      return;
     }
 
     if (!bms_is_safe_to_charge())
