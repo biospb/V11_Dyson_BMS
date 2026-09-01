@@ -1345,8 +1345,9 @@ static void bms_handle_charger_connected(void)
 /** @brief Not charging: manage standby sleep while charger is connected. */
 static void bms_handle_charger_connected_not_charging(void)
 {
-  sw_timer relax_timer = 0;
-  bool     balancing   = false;
+  sw_timer relax_timer   = 0;
+  sw_timer recheck_timer = 0;
+  bool     balancing     = false;
   //Do not drop into standby before balancing has had a chance to look at the
   //pack - the vacuum usually asks to sleep within a second or two of docking,
   //and the next RTC wake is days away. Always false when balancing is compiled
@@ -1358,6 +1359,7 @@ static void bms_handle_charger_connected_not_charging(void)
   //The charge FET is already off on entry to this state; give the cells time to
   //settle before the first balancing decision is taken.
   sw_timer_start(&relax_timer);
+  sw_timer_start(&recheck_timer);
 
   while(1)
   {
@@ -1397,6 +1399,32 @@ static void bms_handle_charger_connected_not_charging(void)
       bms_balance_stop();
       bms_force_fault(BMS_ERR_OVERVOLTAGE);
       return;
+    }
+
+    /*
+     * Re-check for a top-up periodically, not only after a standby wake.
+     *
+     * Balancing bleeds the highest cell down, and dropping back below
+     * CELL_FULL_CHARGE_RELEASE_VOLTAGE is exactly the event that should put
+     * charge back in - that is what makes top-balancing worth doing. But the
+     * only bms_is_pack_full() call used to live inside the standby branch
+     * below, which the "still balancing" continue skips entirely, so the pack
+     * could balance itself down and never resume charging until balancing
+     * stopped AND the cleaner happened to ask to sleep.
+     *
+     * This also covers plain self-discharge over days on the dock.
+     */
+    if (sw_timer_is_elapsed(&recheck_timer, FULL_CHARGE_RECHECK_MS))
+    {
+      sw_timer_start(&recheck_timer);
+
+      if (!bms_is_pack_full())
+      {
+        BMS_PRINT("BMS:TOP_UP needed\r\n");
+        bms_balance_stop();
+        bms_state = BMS_CHARGER_CONNECTED;
+        return;
+      }
     }
 
     if (dsn_prot_get_sleep_flag() == true)
@@ -1582,14 +1610,14 @@ static void bms_handle_charging(void)
       port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
       bq7693_disable_charge();
 
-      //Delay for 30 seconds, then go and try again. Stepped at 250ms rather
+      //Pause, then go and try again. Stepped at 250ms rather
       //than 1s so the balancing LED alternation is not aliased, and so an
       //unplugged charger is noticed within a quarter second.
       {
         sw_timer pause_timer = 0;
         sw_timer_start(&pause_timer);
 
-        while (!sw_timer_is_elapsed(&pause_timer, 30000ul))
+        while (!sw_timer_is_elapsed(&pause_timer, FULL_CHARGE_PAUSE_MS))
         {
           sw_timer_delay_ms(250);
           wdt_reset_count();

@@ -59,7 +59,19 @@
 // LEDs and discharging itself further. Long enough to read the blink count.
 #define FAULT_DISPLAY_TIME                  60 * 5  // seconds
 
-#define FULL_CHARGE_PAUSE_COUNT             3 //Once a cell reaches max charge volts, pause for 30 seconds and retry, this many times.
+// Once a cell reaches max charge volts, stop charging, let the pack settle,
+// then retry - this many times before declaring the pack full. The pause is
+// also when the balancer gets to work on the charge path, and it only starts
+// after CELL_BALANCE_RELAX_MS of the pause has elapsed, so a pause shorter
+// than the relax time does no balancing at all.
+#define FULL_CHARGE_PAUSE_COUNT             4
+#define FULL_CHARGE_PAUSE_MS                60000ul
+
+// While sitting on the dock with the pack "full", re-check on this interval
+// whether it has dropped back below CELL_FULL_CHARGE_RELEASE_VOLTAGE and needs
+// a top-up. Covers balancing bleeding the top cell down, and plain
+// self-discharge over days.
+#define FULL_CHARGE_RECHECK_MS              (5 * 60 * 1000ul)
 
 // How much the charge level may drift before sleep bothers to rewrite the
 // emulated EEPROM. Anything below this is discarded rather than deferred -
