@@ -37,6 +37,12 @@
 #define PACK_MAX_CAPACITY_MAH               4500
 #define CELL_LOWEST_DISCHARGE_VOLTAGE       2500  //mV - wont allow pack to discharge if any cells lower than this
 #define CELL_LOWEST_CHARGE_VOLTAGE          2000    //mV - won't try to charge the pack if any cells lower than this
+// Below this a cell reading is not a flat cell, it is a broken measurement -
+// a severed sense wire, a blown cell tap, or an AFE channel that never
+// converted. A real 18650 sitting in a pack does not reach it. Reported as
+// BMS_ERR_CELL_FAIL rather than BMS_ERR_PACK_DISCHARGED, which matters
+// because the discharged path zeroes the fuel gauge.
+#define CELL_IMPLAUSIBLE_VOLTAGE            500     //mV
 #define CELL_FULL_CHARGE_VOLTAGE            4170    //mV - fully charged cell voltage. Original BMS serial log shows cells charging to 4.17V.
 #define CELL_FULL_CHARGE_RELEASE_VOLTAGE    4100    //mV - resume charging below this (70mV hysteresis)
 
@@ -157,6 +163,13 @@
 // absorbing one costs nothing in safety terms - a real internal fault
 // re-latches immediately and trips this on the next check.
 #define BQ_AFE_FAULT_TOLERANCE              3
+
+// ...and forget them again after this long without one. Without a decay the
+// allowance is spent once per power cycle: after the third transient every
+// later one faults immediately, so an AFE that glitches once an hour would
+// still strand the pack after three hours. It also stops a fault/recovery
+// cycle inheriting an already-exhausted counter.
+#define BQ_AFE_FAULT_DECAY_MS               (10 * 60 * 1000ul)
 
 // How often the balancing decision is re-evaluated.
 #define CELL_BALANCE_PERIOD_MS              2000

@@ -102,9 +102,10 @@ static volatile bool process_bms_interrupt = false;
  * the event.
  */
 static volatile uint8_t bms_sys_stat_faults = 0;
-/* Absorbed DEVICE_XREADY / OVRD_ALERT events this power cycle - see
-   BQ_AFE_FAULT_TOLERANCE. */
-static uint8_t bms_afe_fault_count = 0;
+/* Absorbed DEVICE_XREADY / OVRD_ALERT events - see BQ_AFE_FAULT_TOLERANCE.
+   Decays after BQ_AFE_FAULT_DECAY_MS without one. */
+static uint8_t  bms_afe_fault_count = 0;
+static sw_timer bms_afe_fault_timer = 0;
 static sw_timer bms_sys_stat_timer = 0;
 static volatile bool rtc_wakeup_flag = false;
 static struct rtc_module rtc_instance;
@@ -183,8 +184,10 @@ void bms_init(void)
   //Init the LEDs
   leds_init();
   //Init eeprom emulator
+  /* eeprom_init() already reads the page, verifies its CRC and falls back to
+     defaults if it does not check out, so eeprom_data is populated either
+     way - a second read here was redundant. */
   eeprom_init();
-  eeprom_read();
 
   //Initialise the USART we need to talk to the vacuum cleaner
   serial_init();
@@ -733,6 +736,20 @@ static bool bms_afe_fault_is_real(uint8_t sys_stat, const char *who)
     return false;
   }
 
+  /*
+   * Forget earlier events once the AFE has been quiet for a while. Without
+   * this the allowance is spent once for the life of the power cycle: after
+   * the third transient every later one faults at once, so a chip that
+   * glitches occasionally would still strand the pack eventually, and a
+   * fault/recovery cycle would inherit an exhausted counter and re-fault
+   * immediately.
+   */
+  if (sw_timer_is_elapsed(&bms_afe_fault_timer, BQ_AFE_FAULT_DECAY_MS))
+  {
+    bms_afe_fault_count = 0u;
+  }
+  sw_timer_start(&bms_afe_fault_timer);
+
   if (bms_afe_fault_count < BQ_AFE_FAULT_TOLERANCE)
   {
     bms_afe_fault_count++;
@@ -958,7 +975,20 @@ static bool bms_is_safe_to_discharge(void)
   //Check any cells undervolt.
   for (int i=0; i<7;++i)
   {
-    if (cell_voltages[i] < CELL_LOWEST_DISCHARGE_VOLTAGE)
+    if (cell_voltages[i] < CELL_IMPLAUSIBLE_VOLTAGE)
+    {
+      /*
+       * Not a flat cell - a cell cannot sit here and still be part of a pack
+       * the BMS is being asked to discharge. A severed sense wire, a blown
+       * cell tap or an AFE channel that never converted all land here.
+       * Deliberately NOT BMS_ERR_PACK_DISCHARGED: that path zeroes the fuel
+       * gauge, and throwing away a good charge level because of a broken
+       * measurement is the wrong trade.
+       */
+      bms_set_error(BMS_ERR_CELL_FAIL);
+      BMS_PRINT("BMS:CELL_IMPLAUSIBLE c=%d v=%dmV\r\n", i, cell_voltages[i]);
+    }
+    else if (cell_voltages[i] < CELL_LOWEST_DISCHARGE_VOLTAGE)
     {
       bms_set_error(BMS_ERR_PACK_DISCHARGED);
       BMS_PRINT("BMS:CELL_LOW c=%d v=%dmV\r\n", i, cell_voltages[i]);
@@ -1171,11 +1201,17 @@ static void bms_handle_idle(void)
         {
           /* clear latched faults through the owner before re-enabling */
           bms_sys_stat_service();
-          bq7693_enable_discharge();
-          /* only now is the edge really consumed; if the check failed we
-             leave vacuum_was_connected clear so the next pass retries,
-             rather than never arming discharge again for this idle stay */
-          vacuum_was_connected = true;
+
+          /* only consume the edge once the FET is actually on; if either the
+             safety check or the enable itself failed we leave
+             vacuum_was_connected clear so the next pass retries, rather than
+             never arming discharge again for this idle stay */
+          vacuum_was_connected = bq7693_enable_discharge();
+
+          if (!vacuum_was_connected)
+          {
+            BMS_PRINT("BMS:DSG_ENABLE_FAILED\r\n");
+          }
         }
       }
     }

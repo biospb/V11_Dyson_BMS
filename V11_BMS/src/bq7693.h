@@ -34,6 +34,14 @@
  */
 #define BQ7693_READ_ATTEMPTS 3
 
+/*
+ * Attempts per write. A write carries its own CRC, so the device NACKs a
+ * corrupted one and the register keeps its old value - which for a FET
+ * disable, or for restoring PROTECT1 after the relaxed turn-on threshold,
+ * silently leaves the wrong setting in place.
+ */
+#define BQ7693_WRITE_ATTEMPTS 3
+
 #define THERMISTOR_BETA_VALUE 3435.0  // typical value for Semitec 103AT-5 thermistor
 
 /*
@@ -59,8 +67,9 @@ bool bq7693_comm_healthy(void);
 
 uint16_t* bq7693_get_cell_voltages(void);
 int bq7693_get_pack_voltage(void);
-void bq7693_enable_charge(void);
-void bq7693_enable_discharge(void);
+/* Return false if the FET could not be driven - see bq7693_enable_charge(). */
+bool bq7693_enable_charge(void);
+bool bq7693_enable_discharge(void);
 
 void bq7693_disable_charge(void);
 void bq7693_disable_discharge(void);

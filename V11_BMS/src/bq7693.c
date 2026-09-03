@@ -14,6 +14,7 @@ void bq7693_i2c_init(void);
 //"internal" function primitives
 uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t data);
 static bool bq7693_read_attempt(uint8_t addr, size_t len, uint8_t *buf);
+static bool bq7693_write_attempt(uint8_t addr, uint8_t value);
 
 uint16_t bq7693_cell_voltages[7];
 
@@ -245,18 +246,14 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
 }
 
 /**
- * @brief Write a single byte to a BQ7693 register with CRC.
+ * @brief One attempt at writing a register, with its CRC appended.
  *
  * @param addr   Register address to write to.
  * @param value  Byte value to write.
- * @return       true on success.
+ * @return       true if the device accepted the transfer.
  */
-bool bq7693_write_register(uint8_t addr, uint8_t value)
+static bool bq7693_write_attempt(uint8_t addr, uint8_t value)
 {
-  //Disable interrupts from the EIC - we don't want to end up trying to read the
-  //charge counter half way through an existing i2c op. Re-enable at the end.
-  system_interrupt_disable(SYSTEM_INTERRUPT_MODULE_EIC);
-
   uint16_t timeout = 0;
   bool result = true;
 
@@ -286,6 +283,28 @@ bool bq7693_write_register(uint8_t addr, uint8_t value)
       result = false;
       break;
     }
+  }
+
+  return result;
+}
+
+/**
+ * @brief Write a register, retrying a transfer the device rejected.
+ *
+ * @param addr   Register address.
+ * @param value  Byte to write.
+ * @return       true if an attempt was accepted.
+ */
+bool bq7693_write_register(uint8_t addr, uint8_t value)
+{
+  bool result = false;
+  uint8_t attempt;
+
+  system_interrupt_disable(SYSTEM_INTERRUPT_MODULE_EIC);
+
+  for (attempt = 0u; (attempt < BQ7693_WRITE_ATTEMPTS) && !result; attempt++)
+  {
+    result = bq7693_write_attempt(addr, value);
   }
 
   if (!result)
@@ -339,8 +358,11 @@ uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t inData)
 #define SYS_CTRL2_DSG_ON  0x02
 #define SYS_CTRL2_CHG_ON  0x01
 
-/** @brief Enable the charge FET. Caller must clear SYS_STAT faults first. */
-void bq7693_enable_charge(void)
+/**
+ * @brief Enable the charge FET. Caller must clear SYS_STAT faults first.
+ * @return false if SYS_CTRL2 could not be read, so the FET was left alone.
+ */
+bool bq7693_enable_charge(void)
 {
   uint8_t ctrl2;
 
@@ -356,10 +378,10 @@ void bq7693_enable_charge(void)
      read-modify-write below would otherwise be modifying stack garbage. */
   if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
   {
-    return;
+    return false;
   }
 
-  bq7693_write_register(SYS_CTRL2, ctrl2 | SYS_CTRL2_CC_EN | SYS_CTRL2_CHG_ON);
+  return bq7693_write_register(SYS_CTRL2, ctrl2 | SYS_CTRL2_CC_EN | SYS_CTRL2_CHG_ON);
 }
 
 /** @brief Disable the charge FET, preserving DSG state. */
@@ -381,8 +403,11 @@ void bq7693_disable_charge(void)
   bq7693_write_register(SYS_CTRL2, ctrl2 & ~SYS_CTRL2_CHG_ON);
 }
 
-/** @brief Configure protection, clear errors, and enable the discharge FET. */
-void bq7693_enable_discharge(void)
+/**
+ * @brief Configure protection, clear errors, and enable the discharge FET.
+ * @return false if the FET could not be driven.
+ */
+bool bq7693_enable_discharge(void)
 {
   bq7693_write_register(SYS_CTRL1, 0x10);  //ADC_EN=1
 
@@ -390,6 +415,7 @@ void bq7693_enable_discharge(void)
   bq7693_write_register(PROTECT2, 0x04);
 
   uint8_t ctrl2;
+  bool    ok;
 
   /* SYS_STAT is cleared by the caller through the latch - see
      bq7693_enable_charge(). */
@@ -399,13 +425,18 @@ void bq7693_enable_discharge(void)
   if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
   {
     bq7693_write_register(PROTECT1, 0x82);   //restore the normal SCD threshold
-    return;
+    return false;
   }
 
-  bq7693_write_register(SYS_CTRL2, ctrl2 | SYS_CTRL2_CC_EN | SYS_CTRL2_DSG_ON);
+  ok = bq7693_write_register(SYS_CTRL2, ctrl2 | SYS_CTRL2_CC_EN | SYS_CTRL2_DSG_ON);
 
   bq7693_write_register(PROTECT2, 0x04);
-  bq7693_write_register(PROTECT1, 0x82);
+  /* Must land: leaving PROTECT1 at the relaxed 0x9F used during turn-on would
+     keep the short-circuit threshold at 200mV instead of 89mV. The write is
+     retried internally, and a failure latches the comm error. */
+  ok = bq7693_write_register(PROTECT1, 0x82) && ok;
+
+  return ok;
 }
 
 /** @brief Disable the discharge FET, preserving CHG state. */
@@ -563,7 +594,23 @@ void bq7693_disable_balancing(void)
  */
 void bq7693_balance_update(bq7693_balance_status_t *status)
 {
-  uint16_t *v = bq7693_get_cell_voltages();
+  uint16_t *v;
+
+  /*
+   * Sit this tick out if a transfer has failed since the last safety check.
+   * A failed cell read reports 0mV, which looks like an enormous spread and
+   * would be announced as a failing cell on a perfectly good pack. The safety
+   * check owns the comm error and will fault on it; balancing just waits.
+   */
+  if (!bq7693_comm_healthy())
+  {
+    bq7693_disable_balancing();
+    status->cell_mask = 0;
+    status->num_cells = 0;
+    return;
+  }
+
+  v = bq7693_get_cell_voltages();
   uint16_t  v_min = 0xFFFF;
   uint16_t  v_max = 0;
   uint8_t   max_cell = 0;
