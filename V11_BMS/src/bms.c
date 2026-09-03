@@ -102,6 +102,9 @@ static volatile bool process_bms_interrupt = false;
  * the event.
  */
 static volatile uint8_t bms_sys_stat_faults = 0;
+/* Absorbed DEVICE_XREADY / OVRD_ALERT events this power cycle - see
+   BQ_AFE_FAULT_TOLERANCE. */
+static uint8_t bms_afe_fault_count = 0;
 static sw_timer bms_sys_stat_timer = 0;
 static volatile bool rtc_wakeup_flag = false;
 static struct rtc_module rtc_instance;
@@ -146,6 +149,7 @@ static void    bms_handle_charger_connected_not_charging(void);
 static void    bms_handle_charging(void);
 static void    bms_handle_charger_unplugged(void);
 static bool    bms_fault_pending(void);
+static bool    bms_afe_fault_is_real(uint8_t sys_stat, const char *who);
 static void    bms_blink_error_code(enum BMS_ERROR_CODE code);
 static void    bms_sys_stat_service(void);
 static uint8_t bms_sys_stat_take(void);
@@ -712,6 +716,38 @@ void bms_force_fault(enum BMS_ERROR_CODE code)
 }
 
 /**
+ * @brief Decide whether an AFE-reported fault should fault the pack.
+ *
+ * DEVICE_XREADY is an internal chip fault and OVRD_ALERT means something
+ * external drove the ALERT pin; the AFE turns both FET drivers off for either.
+ * But the datasheet expects transients on both - XREADY "may be set due to
+ * excessive system transients", and ALERT has no internal debounce - so the
+ * first few are absorbed and only a persistent condition is escalated.
+ *
+ * @return true if the pack should fault.
+ */
+static bool bms_afe_fault_is_real(uint8_t sys_stat, const char *who)
+{
+  if ((sys_stat & (STAT_DEVICE_XREADY | STAT_OVRD_ALERT)) == 0u)
+  {
+    return false;
+  }
+
+  if (bms_afe_fault_count < BQ_AFE_FAULT_TOLERANCE)
+  {
+    bms_afe_fault_count++;
+    BMS_PRINT("%s: AFE fault 0x%02X absorbed %u/%u\r\n", who,
+              (unsigned)(sys_stat & (STAT_DEVICE_XREADY | STAT_OVRD_ALERT)),
+              bms_afe_fault_count, BQ_AFE_FAULT_TOLERANCE);
+    return false;
+  }
+
+  BMS_PRINT("%s: AFE fault 0x%02X persistent\r\n", who,
+            (unsigned)(sys_stat & (STAT_DEVICE_XREADY | STAT_OVRD_ALERT)));
+  return true;
+}
+
+/**
  * @brief Blink a fault code as a uniform run of pulses.
  *
  * Pulse LENGTH carries the class, pulse COUNT carries the code within it:
@@ -973,19 +1009,9 @@ static bool bms_is_safe_to_discharge(void)
     bms_set_error(BMS_ERR_OVERVOLTAGE);
     BMS_PRINT("%s: BMS IC Overvoltage Trip\r\n", __FUNCTION__);
   }
-  if (sys_stat & STAT_DEVICE_XREADY)
+  if (bms_afe_fault_is_real(sys_stat, __FUNCTION__))
   {
-    /* Internal AFE fault. The chip turns both FET drivers off and clears
-       CELLBAL1/2/3 by itself, so this must not be cleared and forgotten. */
     bms_set_error(BMS_ERR_I2C_FAIL);
-    BMS_PRINT("%s: BQ7693 DEVICE_XREADY\r\n", __FUNCTION__);
-  }
-  if (sys_stat & STAT_OVRD_ALERT)
-  {
-    /* Something external drove ALERT high - on a pack like this that means a
-       secondary protector fired. The AFE disables both FETs in response. */
-    bms_set_error(BMS_ERR_I2C_FAIL);
-    BMS_PRINT("%s: BQ7693 OVRD_ALERT (external protector)\r\n", __FUNCTION__);
   }
 
   /* Checked last: if the bus failed, everything decided above was decided on
@@ -1073,15 +1099,9 @@ static bool bms_is_safe_to_charge(void)
   {
     bms_set_error(BMS_ERR_OVERVOLTAGE);
   }
-  if (sys_stat & STAT_DEVICE_XREADY)
+  if (bms_afe_fault_is_real(sys_stat, __FUNCTION__))
   {
     bms_set_error(BMS_ERR_I2C_FAIL);
-    BMS_PRINT("%s: BQ7693 DEVICE_XREADY\r\n", __FUNCTION__);
-  }
-  if (sys_stat & STAT_OVRD_ALERT)
-  {
-    bms_set_error(BMS_ERR_I2C_FAIL);
-    BMS_PRINT("%s: BQ7693 OVRD_ALERT (external protector)\r\n", __FUNCTION__);
   }
 
   /* Checked last: if the bus failed, everything decided above was decided on
@@ -1333,8 +1353,6 @@ static void bms_handle_fault(void)
 
   BMS_PRINT("BMS:FAULT err=%d auto_recover=%d\r\n", original_error, auto_recover);
 
-  /* No eeprom_write() here. bms_handle_sleep() is the single commit point,
-     and this state can now reach it via the display timeout below. */
   sw_timer_start(&fault_timer);
 
   leds_off();
@@ -1352,6 +1370,21 @@ static void bms_handle_fault(void)
     eeprom_data.current_charge_level = 0;
     eeprom_data.full_discharge_seen = 1;
   }
+
+  /*
+   * Commit here, after the discharged/undervoltage handling above has settled
+   * the values. Sleep is still the normal commit point and this state reaches
+   * it via the display timeout, but a fault is exactly when the pack is most
+   * likely to lose power before getting there - and it is also when the
+   * full_discharge_seen marker the capacity learning depends on gets set.
+   *
+   * Costs nothing when there is nothing to save: eeprom_write() compares
+   * against what is stored and returns without touching flash if the values
+   * match, so a fault that repeats without the charge level moving does not
+   * write at all. That comparison is what makes committing here safe - the
+   * original firmware wrote unconditionally on every entry to this state.
+   */
+  (void)eeprom_write();
 
   bool trigger_state = bms_trigger_active();
 

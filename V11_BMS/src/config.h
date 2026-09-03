@@ -92,6 +92,7 @@
 // every change exactly.
 #define EEPROM_CHARGE_TOLERANCE_UAH         (10 * 1000ul)   // 10mAh
 
+
 #define SERIAL_DEBUG                        1 //Serial debug via the spare USART on the programming pins header
 #define PROT_DEBUG_PRINT                    1
 
@@ -143,6 +144,19 @@
 // Tracks MAX_PACK_CHARGE_TEMP by default; lower it if you want balancing to
 // back off earlier than charging does.
 #define CELL_BALANCE_MAX_TEMP               MAX_PACK_CHARGE_TEMP   //'C
+
+// How many AFE-reported internal faults (DEVICE_XREADY) or external ALERT
+// overrides (OVRD_ALERT) to absorb before faulting the pack.
+//
+// The datasheet says DEVICE_XREADY "may be set due to excessive system
+// transients" and recommends the host simply clear it, and it warns that the
+// ALERT pin has no internal debounce and needs protecting from noise. On a
+// pack where PA28 picks up switching noise from the motor, treating the first
+// event as a hard fault would strand the pack for a glitch. Each event is
+// still logged, and the AFE has already dropped both FETs by itself, so
+// absorbing one costs nothing in safety terms - a real internal fault
+// re-latches immediately and trips this on the next check.
+#define BQ_AFE_FAULT_TOLERANCE              3
 
 // How often the balancing decision is re-evaluated.
 #define CELL_BALANCE_PERIOD_MS              2000

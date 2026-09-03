@@ -13,6 +13,7 @@ void bq7693_i2c_init(void);
 
 //"internal" function primitives
 uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t data);
+static bool bq7693_read_attempt(uint8_t addr, size_t len, uint8_t *buf);
 
 uint16_t bq7693_cell_voltages[7];
 
@@ -111,19 +112,15 @@ void bq7693_init()
 }
 
 /**
- * @brief Read one or more bytes from a BQ7693 register via I2C.
+ * @brief One attempt at a register read: address, data+CRC, verify, copy out.
  *
  * @param addr  Register address to read from.
- * @param len   Number of bytes to read.
+ * @param len   Number of DATA bytes to read.
  * @param buf   Buffer to store the read data.
- * @return      true on success.
+ * @return      true if the transfer completed and every CRC verified.
  */
-bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
- {
-  //Disable interrupts from the EIC - we don't want to end up trying to read the
-  //charge counter half way through an existing i2c op. Re-enable at the end.
-  system_interrupt_disable(SYSTEM_INTERRUPT_MODULE_EIC);
-
+static bool bq7693_read_attempt(uint8_t addr, size_t len, uint8_t *buf)
+{
   uint16_t timeout = 0;
   bool result = true;
   /* The BQ7693003 has CRC enabled, so it sends a CRC byte after every data
@@ -133,8 +130,6 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
 
   if ((len == 0u) || (len > BQ7693_MAX_READ_LEN))
   {
-    bq7693_comm_ok = false;
-    system_interrupt_enable(SYSTEM_INTERRUPT_MODULE_EIC);
     return false;
   }
 
@@ -213,6 +208,33 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
     }
   }
 
+  return result;
+}
+
+/**
+ * @brief Read one or more register bytes, retrying a corrupted transfer.
+ *
+ * @param addr  Register address to read from.
+ * @param len   Number of DATA bytes to read (CRC bytes are handled inside).
+ * @param buf   Buffer for the data bytes.
+ * @return      true if an attempt succeeded with a valid CRC.
+ */
+bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
+{
+  bool result = false;
+  uint8_t attempt;
+
+  //Disable interrupts from the EIC - we don't want to end up trying to read the
+  //charge counter half way through an existing i2c op. Re-enable at the end.
+  system_interrupt_disable(SYSTEM_INTERRUPT_MODULE_EIC);
+
+  for (attempt = 0u; (attempt < BQ7693_READ_ATTEMPTS) && !result; attempt++)
+  {
+    result = bq7693_read_attempt(addr, len, buf);
+  }
+
+  /* Only a transfer that failed every attempt counts as a comm error. A single
+     corrupted read on a marginal bus would otherwise fault the pack outright. */
   if (!result)
   {
     bq7693_comm_ok = false;

@@ -25,6 +25,15 @@
    so the on-the-wire transfer is twice this. */
 #define BQ7693_MAX_READ_LEN 4
 
+/*
+ * Attempts per read before the comm error is latched. A bad CRC leaves the
+ * slave idle and ready (SLUSBK2I 8.3.1.1.2: "the I2C master will NACK the
+ * CRC, which causes the I2C slave to go to an idle state"), so a retry is the
+ * intended recovery for a corrupted transfer rather than a fault. A genuinely
+ * dead or wrongly-wired bus still fails all attempts and faults.
+ */
+#define BQ7693_READ_ATTEMPTS 3
+
 #define THERMISTOR_BETA_VALUE 3435.0  // typical value for Semitec 103AT-5 thermistor
 
 /*
