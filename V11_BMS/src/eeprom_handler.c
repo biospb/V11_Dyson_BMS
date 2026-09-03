@@ -131,7 +131,7 @@ int eeprom_write(void)
    * exact compare.
    *
    * Even at 0 the skip still fires often: with the FETs off and no load the
-   * coulomb counter sits at 0-1 LSB, and cc_uah = ccVal * 19203 / 32768
+   * coulomb counter sits at 0-1 LSB, and cc_uah = ccVal * 19205 / 32768
    * integer divides to zero for |ccVal| <= 1, so a pack that wakes, sees
    * nothing and sleeps again 20s later has a bit-identical charge level.
    *

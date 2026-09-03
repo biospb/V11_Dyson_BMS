@@ -259,7 +259,7 @@ bool bq7693_write_register(uint8_t addr, uint8_t value)
   while (i2c_master_write_packet_wait(&i2c_master_instance, &packet) != STATUS_OK)
   {
     /* Increment timeout counter and check if timed out. */
-    if (timeout++ == BQ7693_TIMEOUT)
+    if (timeout++ >= BQ7693_TIMEOUT)
     {
       result = false;
       break;

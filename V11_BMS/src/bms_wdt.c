@@ -110,8 +110,11 @@ void bms_wdt_mainloop(void)
 /**
  * @brief WDT early-warning interrupt callback.
  *
- * Disables both charge and discharge FETs as a safety measure
- * before the watchdog resets the MCU.
+ * Raises BMS_ERR_WDT and forces the state machine into BMS_FAULT. It does NOT
+ * touch the FETs - the state handlers do that when they see the fault, which
+ * is the only place that knows what to leave in a safe state. If the main loop
+ * really is stuck the fault is never acted on at all and the watchdog resets
+ * the MCU at 1024 clocks, twice this callback's 512.
  */
 static void bms_wdt_early_warning_callback(void)
 {

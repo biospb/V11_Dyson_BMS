@@ -245,7 +245,7 @@ void bms_interrupt_process(void)
     int32_t ccVal = bq7693_read_cc();
 
     //This needs better handling....
-    current_mA = (ccVal * (uint16_t)(8.44f * 4096.0f)) / 4096;
+    current_mA = (ccVal * (uint16_t)(BQ7693_CC_LSB_MA * 4096.0f)) / 4096;
 
     /*
      * First-order IIR:  sum += alpha * (x - sum>>FRAC),  filtered = sum>>FRAC
@@ -253,7 +253,7 @@ void bms_interrupt_process(void)
      * This used a Q16 accumulator, which can only represent a filtered
      * current of +-32767mA before sum overflows int32 - and it truncated
      * both the input and the feedback term to int16_t on the way in. At
-     * 8.44mA per CC LSB the coulomb counter reaches +-276A, and a vacuum
+     * BQ7693_CC_LSB_MA per CC LSB the coulomb counter reaches +-276A, and a vacuum
      * motor inrush passes 32.7A easily, at which point the difference wraps
      * and the filter runs away. Q8 leaves 1/256 mA of resolution on the
      * output - far more than the 8.44mA input step - while keeping the
@@ -279,7 +279,7 @@ void bms_interrupt_process(void)
       //Dividing by 14400 would give mAH. (number of 250mS periods in 1 hr.
       //Dividing by 14.4 will give microAH (what we want)
       // 14.4 = ((3600 * 1000) / 250ms) / 1000mAh
-      cc_uah = ccVal * (int16_t)(((8.44f * 250.0f * 32768.0f) / (3600.0f)));
+      cc_uah = ccVal * (int16_t)(((BQ7693_CC_LSB_MA * BQ7693_CC_PERIOD_MS * 32768.0f) / (3600.0f)));
       cc_uah /= 32768;
       eeprom_data.current_charge_level += cc_uah;
 
@@ -694,7 +694,17 @@ static bool bms_trigger_active(void)
 #endif
 }
 
-/** @brief Force the state machine into BMS_FAULT with the given error code. ISR-safe. */
+/**
+ * @brief Force the state machine into BMS_FAULT with the given error code.
+ *
+ * Called from interrupt context (the watchdog early warning). The two writes
+ * are separate, so the ORDER matters: bms_error first, bms_state second. A
+ * reader that observes BMS_FAULT must already be able to see the code that
+ * goes with it, otherwise bms_handle_fault() blinks a stale or empty one.
+ * Both are volatile, so the compiler may not reorder them relative to each
+ * other, and this is a single-core M0+ with one reader (the main loop), so no
+ * barrier is needed - but do not swap these two lines.
+ */
 void bms_force_fault(enum BMS_ERROR_CODE code)
 {
   bms_error = code;
