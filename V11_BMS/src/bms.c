@@ -57,8 +57,20 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
  * only, so any latched bit holds the line high and no further edge can ever
  * arrive. Poll on this interval as well so a latched fault cannot wedge the
  * interrupt permanently.
+ *
+ * This MUST match the coulomb counter's conversion window. CC_READY latches
+ * and the CC register holds only the most recent 250ms window - the datasheet
+ * is explicit that the bit stays latched if it is not cleared between two
+ * adjacent readings, and the older reading is simply gone. Polling slower than
+ * 250ms therefore integrates one window in every N and undercounts the charge
+ * by that factor, silently, for as long as ALERT is wedged. Scaling by the
+ * number of missed windows would only be a constant-current guess; sampling
+ * every window is exact.
+ *
+ * Costs nothing when ALERT is healthy: every service restarts this timer, so
+ * the poll only fires if no ALERT has arrived for a full window.
  */
-#define SYS_STAT_POLL_MS        (1000ul)
+#define SYS_STAT_POLL_MS        (250ul)
 
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL TYPES
@@ -1127,6 +1139,8 @@ static void bms_handle_idle(void)
            has since gone away */
         if (dsn_prot_get_vacuum_connected())
         {
+          /* clear latched faults through the owner before re-enabling */
+          bms_sys_stat_service();
           bq7693_enable_discharge();
           /* only now is the edge really consumed; if the check failed we
              leave vacuum_was_connected clear so the next pass retries,
@@ -1574,6 +1588,8 @@ static void bms_handle_charging(void)
   //Enable charging.
   port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
   //Enable the charge FET in the BQ7693.
+  /* clear latched faults through the owner before re-enabling */
+  bms_sys_stat_service();
   bq7693_enable_charge();
 
   charge_pause_counter = 0;
@@ -1654,6 +1670,8 @@ static void bms_handle_charging(void)
       // otherwise leave it to the idle loop's vacuum-connect edge.
       if (dsn_prot_get_vacuum_connected() && bms_is_safe_to_discharge())
       {
+        /* clear latched faults through the owner before re-enabling */
+        bms_sys_stat_service();
         bq7693_enable_discharge();
       }
 
@@ -1693,6 +1711,8 @@ static void bms_handle_charging(void)
             bms_balance_stop();
             if (dsn_prot_get_vacuum_connected() && bms_is_safe_to_discharge())
             {
+              /* clear latched faults through the owner before re-enabling */
+              bms_sys_stat_service();
               bq7693_enable_discharge();
             }
             leds_off();
@@ -1720,6 +1740,8 @@ static void bms_handle_charging(void)
 
       //Restart charging
       port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
+      /* clear latched faults through the owner before re-enabling */
+      bms_sys_stat_service();
       bq7693_enable_charge();
     }
     else

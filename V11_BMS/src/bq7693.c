@@ -317,18 +317,19 @@ uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t inData)
 #define SYS_CTRL2_DSG_ON  0x02
 #define SYS_CTRL2_CHG_ON  0x01
 
-/** @brief Clear SYS_STAT errors and enable the charge FET. */
+/** @brief Enable the charge FET. Caller must clear SYS_STAT faults first. */
 void bq7693_enable_charge(void)
 {
-  uint8_t scratch;
   uint8_t ctrl2;
 
-  //Clear any bits in the SYS_STAT error register
-  if (bq7693_read_register(SYS_STAT, 1, &scratch))
-  {
-    bq7693_write_register(SYS_STAT, scratch); //Explicitly clear any set bits in the SYS_STAT register by writing them back.
-  }
-
+  /*
+   * SYS_STAT is deliberately NOT touched here. The datasheet requires the
+   * fault bit to be cleared before the FET will re-enable, but this function
+   * used to do that by writing back every set bit - which clears them without
+   * routing them through bms_sys_stat_faults, so a fault arriving between the
+   * safety check and this call was silently discarded. The caller clears them
+   * through the latch instead; see bms_sys_stat_service().
+   */
   /* Refuse to turn a FET on when the current register state is unknown - the
      read-modify-write below would otherwise be modifying stack garbage. */
   if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
@@ -366,13 +367,10 @@ void bq7693_enable_discharge(void)
   bq7693_write_register(PROTECT1, 0x9F);
   bq7693_write_register(PROTECT2, 0x04);
 
-  uint8_t scratch;
   uint8_t ctrl2;
 
-  if (bq7693_read_register(SYS_STAT, 1, &scratch))
-  {
-    bq7693_write_register(SYS_STAT, scratch); //Explicitly clear any set bits in the SYS_STAT register by writing them back.
-  }
+  /* SYS_STAT is cleared by the caller through the latch - see
+     bq7693_enable_charge(). */
 
   //DSG_ON turns the discharge FET on. Preserve CHG_ON so charging is not affected.
   /* As in bq7693_enable_charge(): never turn a FET on from an unknown state. */
