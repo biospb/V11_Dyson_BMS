@@ -82,13 +82,25 @@ void bq7693_init()
   bq7693_i2c_init();
   bq7693_write_register(SYS_CTRL2, 0x00); //Ensure that charge/discharge FETs are off so pack is safe.
 
-  //Read the ADC offset and gain values and store
-  uint8_t scratch1, scratch2;
-  bq7693_read_register(ADCOFFSET, 1, &scratch1);  // convert from 2's complement
-  bq7693_adc_offset = (int8_t)scratch1;
-  bq7693_read_register(ADCGAIN1, 1, &scratch1);
-  bq7693_read_register(ADCGAIN2, 1, &scratch2);
-  bq7693_adc_gain = 365 + ((( scratch1 & 0x0C) << 1) | (( scratch2 & 0xE0) >> 5)); // uV/LSB
+  /*
+   * Read the ADC calibration. A read that fails leaves its buffer untouched,
+   * so these start at the middle of the trimmed range - GAIN 365+15 uV/LSB,
+   * OFFSET 0mV - rather than at whatever was on the stack. The values go
+   * straight into the OV/UV trip registers below, and stack garbage there
+   * could put the AFE's own trips anywhere. The failed read has latched the
+   * comm error, so the first safety check faults the pack regardless; this
+   * only bounds what the AFE is told in the meantime.
+   */
+  uint8_t offset_raw = 0x00;   // 0mV
+  uint8_t gain1_raw  = 0x04;   // ADCGAIN<4:3> = 01  } 15 of 0..31, the
+  uint8_t gain2_raw  = 0xE0;   // ADCGAIN<2:0> = 111 } middle of the range
+  uint8_t trip;
+
+  (void)bq7693_read_register(ADCOFFSET, 1, &offset_raw);
+  (void)bq7693_read_register(ADCGAIN1,  1, &gain1_raw);
+  (void)bq7693_read_register(ADCGAIN2,  1, &gain2_raw);
+  bq7693_adc_offset = (int8_t)offset_raw;   // 2's complement, mV
+  bq7693_adc_gain   = 365 + (((gain1_raw & 0x0C) << 1) | ((gain2_raw & 0xE0) >> 5)); // uV/LSB
 
   bq7693_write_register(PROTECT1, 0x82);
   bq7693_write_register(PROTECT2, 0x04);
@@ -97,11 +109,11 @@ void bq7693_init()
   bq7693_write_register(PROTECT3, 0x00);
 
   //Calculate OV and UV trip voltages.
-  scratch1 = (((((long)CELL_OVERVOLTAGE_TRIP - bq7693_adc_offset)*1000)/ bq7693_adc_gain) >> 4) & 0xFF;
-  bq7693_write_register(OV_TRIP, scratch1);
+  trip = (((((long)CELL_OVERVOLTAGE_TRIP - bq7693_adc_offset)*1000)/ bq7693_adc_gain) >> 4) & 0xFF;
+  bq7693_write_register(OV_TRIP, trip);
 
-  scratch1 = (((((long)CELL_UNDERVOLTAGE_TRIP - bq7693_adc_offset) * 1000) / bq7693_adc_gain) >> 4) & 0xFF;
-  bq7693_write_register(UV_TRIP, scratch1);
+  trip = (((((long)CELL_UNDERVOLTAGE_TRIP - bq7693_adc_offset) * 1000) / bq7693_adc_gain) >> 4) & 0xFF;
+  bq7693_write_register(UV_TRIP, trip);
 
   bq7693_write_register(CELLBAL1, 0x00); //Disable cell balancing 1
   bq7693_write_register(CELLBAL2, 0x00); //Disable cell balancing 2
@@ -111,8 +123,14 @@ void bq7693_init()
 
   bq7693_write_register(SYS_CTRL1, 0x10); //ADC_EN
 
-  bq7693_read_register(SYS_STAT, 1, &scratch1);
-  bq7693_write_register(SYS_STAT, scratch1); //Explicitly clear any set bits in the SYS_STAT register by writing them back.
+  //Explicitly clear any set bits in the SYS_STAT register by writing them
+  //back - but only bits we actually read. Writing an unread byte back would
+  //poke the reserved bit and clear nothing in particular.
+  uint8_t sys_stat;
+  if (bq7693_read_register(SYS_STAT, 1, &sys_stat))
+  {
+    bq7693_write_register(SYS_STAT, sys_stat);
+  }
 }
 
 /**
