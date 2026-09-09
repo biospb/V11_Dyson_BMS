@@ -127,6 +127,9 @@ static sw_timer bms_afe_fault_timer = 0;
 static bool     bms_afe_fet_dropped_flag = false;
 static sw_timer bms_sys_stat_timer = 0;
 static volatile bool rtc_wakeup_flag = false;
+//volatile: set by the trigger/charger/mode-button EIC callbacks while the
+//wake sources are armed, tested under a critical section before WFI.
+static volatile bool bms_wake_event = false;
 static struct rtc_module rtc_instance;
 
 extern volatile struct eeprom_data eeprom_data;
@@ -225,10 +228,13 @@ void bms_init(void)
 #endif
 }
 
-/** @brief External interrupt callback for wakeup events (unused). */
+/** @brief External interrupt callback for the standby wake sources. */
 void bms_wakeup_interrupt_callback(void)
 {
-
+  /* The edge itself is what wakes the core. This flag exists for the window
+     between arming the wake sources and executing WFI, where the ISR would
+     otherwise consume the edge and the core would then sleep through it. */
+  bms_wake_event = true;
 }
 
 /** @brief BQ7693 ALERT pin interrupt callback, sets processing flag. */
@@ -1698,7 +1704,25 @@ static void bms_handle_charger_connected_not_charging(void)
        * point needs restarting after the wake.
        */
       system_set_sleepmode(SYSTEM_SLEEPMODE_STANDBY);
-      system_sleep(); // WFI
+
+      /*
+       * Test-then-sleep has to be atomic. The wake sources were armed in
+       * bms_enter_standby() and the LED blink above took 400ms: an edge in
+       * that window ran the ISR, which cleared it, and WFI then slept
+       * through it - until the next edge, or the RTC two days later. A
+       * cleaner lifted off the dock in that window was not noticed until
+       * the trigger was pulled, and that pull was spent on waking up.
+       *
+       * With interrupts masked the ISR cannot run between the test and the
+       * WFI. WFI still returns on a pending interrupt, which is then taken
+       * as soon as the critical section is left.
+       */
+      system_interrupt_enter_critical_section();
+      if (!bms_wake_event && !rtc_wakeup_flag)
+      {
+        system_sleep(); // WFI
+      }
+      system_interrupt_leave_critical_section();
 
       bms_leave_standby();
       rtc_standby_timer_stop();
@@ -2114,6 +2138,15 @@ static void bms_enter_standby(void)
   system_gclk_chan_enable(EIC_GCLK_ID);
   /* 5) Start EIC again */
   _extint_enable();
+
+  // Edge detection runs on these channels all the time, only the interrupt
+  // was masked - so an edge from hours ago is still flagged, and enabling the
+  // callback would fire on it at once and count as a wake. Drop the stale
+  // flags first; anything that happens from here on is a real wake.
+  bms_wake_event = false;
+  extint_chan_clear_detected(9);
+  extint_chan_clear_detected(4);
+  extint_chan_clear_detected(6);
 
   // enable callbacks, need to wakeup the mcu
   extint_chan_enable_callback(9, EXTINT_CALLBACK_TYPE_DETECT);  // MODE_BUTTON            EXTINT 9 - PA09
