@@ -779,19 +779,19 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
 /**
  * @brief Read raw coulomb counter value from BQ7693.
  *
- * @return  Signed 16-bit CC value.
+ * @param cc  Receives the signed 16-bit CC value on success.
+ * @return    false if the read failed - this used to return 0, which the
+ *            caller integrated as a genuine 0mA window.
  */
-int16_t bq7693_read_cc(void)
+bool bq7693_read_cc(int16_t *cc)
 {
-  int16_t tempCC;
-
   uint8_t scratch[2];
+
   if (!bq7693_read_register(CC_HI_BYTE, 2, scratch))
   {
-    return 0;
+    return false;
   }
-  tempCC =  ((scratch[0])<<8);
-  tempCC |= scratch[1];
 
-  return tempCC;
+  *cc = (int16_t)(((uint16_t)scratch[0] << 8) | scratch[1]);
+  return true;
 }

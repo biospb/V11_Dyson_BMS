@@ -96,7 +96,8 @@ void bq7693_disable_discharge(void);
 
 void bq7693_enter_sleep_mode(void);
 
-int16_t bq7693_read_cc(void);
+/* Return false if the register could not be read; *cc is untouched then. */
+bool bq7693_read_cc(int16_t *cc);
 
 //-----------------------------------------------------------------------------
 // Passive cell balancing - compiled out entirely when CELL_BALANCE_ENABLE is 0

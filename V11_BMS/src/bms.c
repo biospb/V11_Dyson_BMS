@@ -278,8 +278,21 @@ void bms_interrupt_process(void)
 
   if (sys_stat & STAT_CC_READY)
   {
-    //Got a coulomb charger count ready.
-    int32_t ccVal = bq7693_read_cc();
+    int16_t cc_raw;
+    int32_t ccVal;
+
+    /*
+     * If the CC read itself fails, leave CC_READY set and come back. The
+     * window is still in the register, ALERT stays high, and the next poll
+     * (SYS_STAT_POLL_MS, shorter than the 250ms window) reads it before the
+     * following conversion overwrites it. Clearing the bit regardless, as
+     * this used to, integrated the window as a silent 0mA.
+     */
+    if (!bq7693_read_cc(&cc_raw))
+    {
+      return;
+    }
+    ccVal = cc_raw;
 
     //This needs better handling....
     current_mA = (ccVal * (uint16_t)(BQ7693_CC_LSB_MA * 4096.0f)) / 4096;
