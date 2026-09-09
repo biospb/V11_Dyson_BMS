@@ -68,7 +68,7 @@
  * Coulomb counter scale. The CC register reads in 8.44uV steps across the
  * sense resistor, and this pack uses 1mOhm, so one LSB is 8.44uV / 1mOhm =
  * 8.44mA. The counter integrates over a fixed 250ms window - see also
- * SYS_STAT_POLL_MS, which has to match it.
+ * SYS_STAT_POLL_MS, which has to be shorter than it.
  */
 #define BQ7693_CC_LSB_MA        8.44f
 #define BQ7693_CC_PERIOD_MS     250.0f

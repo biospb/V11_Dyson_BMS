@@ -58,19 +58,21 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
  * arrive. Poll on this interval as well so a latched fault cannot wedge the
  * interrupt permanently.
  *
- * This MUST match the coulomb counter's conversion window. CC_READY latches
- * and the CC register holds only the most recent 250ms window - the datasheet
- * is explicit that the bit stays latched if it is not cleared between two
- * adjacent readings, and the older reading is simply gone. Polling slower than
- * 250ms therefore integrates one window in every N and undercounts the charge
- * by that factor, silently, for as long as ALERT is wedged. Scaling by the
- * number of missed windows would only be a constant-current guess; sampling
- * every window is exact.
+ * This MUST be shorter than the coulomb counter's 250ms conversion window.
+ * CC_READY latches and the CC register holds only the most recent window -
+ * the datasheet is explicit that the bit stays latched if it is not cleared
+ * between two adjacent readings, and the older reading is simply gone.
+ * Polling slower than the window therefore integrates one window in every N
+ * and undercounts the charge by that factor, silently, for as long as ALERT
+ * is wedged. Polling at exactly 250ms is not enough either: the timer fires
+ * at 251ms and the two clocks drift, so one window in every ~250 was still
+ * dropped. Polling faster costs only the occasional read that finds CC_READY
+ * clear.
  *
  * Costs nothing when ALERT is healthy: every service restarts this timer, so
- * the poll only fires if no ALERT has arrived for a full window.
+ * the poll only fires if no ALERT has arrived for this long.
  */
-#define SYS_STAT_POLL_MS        (250ul)
+#define SYS_STAT_POLL_MS        (200ul)
 
 /*
  * How long bms_handle_idle() waits before re-trying a discharge arm that
