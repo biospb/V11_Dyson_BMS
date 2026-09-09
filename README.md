@@ -157,10 +157,15 @@ A watchdog fault only appears if the firmware stalled for between 0.5 and 1.0
 seconds and then recovered. A stall past 1.0 seconds resets the MCU outright,
 so a genuine hang shows up as the pack restarting, not as a blink pattern.
 
-The fault display gives up after `FAULT_DISPLAY_TIME` (5 minutes) and the pack
-shuts down, so a flat pack does not sit blinking itself further into the
-ground. Plugging in the charger or pulling the trigger leaves the fault state
+Off the charger, the fault display gives up after `FAULT_DISPLAY_TIME`
+(5 minutes) and the pack shuts down, so a flat pack does not sit blinking
+itself further into the ground. Pulling the trigger leaves the fault state
 immediately.
+
+On the charger the pack keeps blinking and re-checks every `FAULT_RETRY_MS`
+(5 seconds) whether it is safe to charge; as soon as it is, charging starts.
+That is how a flat pack recovers, and it is why a pack that is too hot to
+charge shows the "too hot" pattern on the dock until it has cooled.
 
 ## License
 

@@ -1499,8 +1499,9 @@ static void bms_handle_fault(void)
   bms_balance_stop();
   port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
 
-  if (auto_recover)
-    sw_timer_start(&retry_timer);
+  /* Paces both recovery routes below; the charger route applies to every
+     code, so it is started unconditionally. */
+  sw_timer_start(&retry_timer);
 
   if (bms_error == BMS_ERR_PACK_DISCHARGED || bms_error == BMS_ERR_UNDERVOLTAGE)
   {
@@ -1532,17 +1533,48 @@ static void bms_handle_fault(void)
     sw_timer_delay_ms(FAULT_BLINK_REPEAT_MS);
     wdt_reset_count();
 
-    if (dio_read(DIO_CHARGER_CONNECTED))
-    {
-      bms_state = BMS_CHARGER_CONNECTED;
-      return;
-    }
+    const bool charger   = dio_read(DIO_CHARGER_CONNECTED);
+    const bool retry_due = sw_timer_is_elapsed(&retry_timer, FAULT_RETRY_MS);
 
-    if (sw_timer_is_elapsed(&fault_timer, (uint32_t)FAULT_DISPLAY_TIME * 1000ul))
+    if (charger)
+    {
+      /*
+       * Hand over to charging only once the pack is actually chargeable.
+       * Going straight to BMS_CHARGER_CONNECTED bounced back here on its
+       * safety check for anything the charge path rejects - a pack between
+       * MAX_PACK_CHARGE_TEMP and MAX_PACK_TEMPERATURE, a dead bus, a broken
+       * cell tap - once per blink cycle, each time re-entering this state
+       * with the FET disables and the EEPROM compare.
+       *
+       * The same check is what recovers a flat pack: charging IS the fix
+       * for PACK_DISCHARGED and UNDERVOLTAGE, and bms_is_safe_to_charge()
+       * passes both. So this applies to every code, not just the
+       * self-recovering ones.
+       */
+      if (retry_due)
+      {
+        sw_timer_start(&retry_timer);
+
+        if (bms_is_safe_to_charge())
+        {
+          BMS_PRINT("BMS:FAULT_RECOVERED err=%d, charger\r\n", original_error);
+          bms_error = BMS_ERR_NONE;
+          leds_off();
+          bms_state = BMS_CHARGER_CONNECTED;
+          return;
+        }
+        /* not safe: bms_error now carries the fresh verdict, which is at
+           least the original code - a worse finding is shown, not hidden */
+      }
+    }
+    else if (sw_timer_is_elapsed(&fault_timer, (uint32_t)FAULT_DISPLAY_TIME * 1000ul))
     {
       /* The user has had long enough to read the code. Shut the pack down
          rather than blinking forever - which on a flat pack means draining
-         it further - and let bms_handle_sleep() commit the charge level. */
+         it further - and let bms_handle_sleep() commit the charge level.
+         Off the charger only: SHIP mode with the charger attached may not
+         remove power (see bms_handle_sleep), and a docked pack is better
+         off re-checking above until it can charge. */
       BMS_PRINT("BMS:FAULT display timeout, sleeping\r\n");
       bms_state = BMS_SLEEP;
       return;
@@ -1558,10 +1590,11 @@ static void bms_handle_fault(void)
     }
     trigger_state = trigger_now;
 
-    if (auto_recover && sw_timer_is_elapsed(&retry_timer, 5000))
+    if (auto_recover && !charger && retry_due)
     {
-      bool safe = bms_is_safe_to_discharge();
-      if (safe)
+      sw_timer_start(&retry_timer);
+
+      if (bms_is_safe_to_discharge())
       {
         BMS_PRINT("BMS:FAULT_RECOVERED err=%d\r\n", original_error);
         bms_error = BMS_ERR_NONE;
@@ -1569,8 +1602,13 @@ static void bms_handle_fault(void)
         bms_state = BMS_IDLE;
         return;
       }
-      bms_error = original_error;
-      sw_timer_start(&retry_timer);
+      /*
+       * Deliberately no "bms_error = original_error" here. The check
+       * snapshots the pending code and restores it through bms_set_error(),
+       * which only raises, so bms_error is now max(fresh, original). Forcing
+       * it back to the original kept blinking "overtemp" while the bus had
+       * died underneath, and kept retrying as if that were recoverable.
+       */
     }
   }
 }

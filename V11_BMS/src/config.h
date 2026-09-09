@@ -65,6 +65,11 @@
 // LEDs and discharging itself further. Long enough to read the blink count.
 #define FAULT_DISPLAY_TIME                  60 * 5  // seconds
 
+// How often BMS_FAULT re-evaluates the pack: the discharge check for a
+// self-recovering fault off the charger, the charge check whenever the
+// charger is attached (charging is the recovery for a flat pack).
+#define FAULT_RETRY_MS                      5000
+
 // Fault codes are blinked as a uniform run of pulses, with the pulse LENGTH
 // carrying the class and the COUNT carrying the code within that class:
 //   short pulses -> self-recovering fault, counts 1..4
