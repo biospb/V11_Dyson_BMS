@@ -106,6 +106,12 @@ add_link_options(
     ${MCU_FLAGS}
     -Wl,--gc-sections
     -Wl,-Map=${PROJECT_NAME}.map
+    # The ASF script defaults STACK_SIZE to 1KB and leaves the rest of the
+    # 4KB idle above it. .data + .bss are ~1.7KB, so 2KB fits with room to
+    # spare, and the deepest path (fault handler -> delay -> protocol ->
+    # nested delay -> protocol -> frame parse, each with a 128B print buffer)
+    # was within 1KB but not by much.
+    -Wl,--defsym,STACK_SIZE=0x800
     -T${LINKER_SCRIPT}
     --specs=nano.specs
     --specs=nosys.specs
