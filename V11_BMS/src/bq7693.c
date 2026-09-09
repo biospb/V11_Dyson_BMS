@@ -597,11 +597,21 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
   uint16_t *v;
 
   /*
-   * Sit this tick out if a transfer has failed since the last safety check.
-   * A failed cell read reports 0mV, which looks like an enormous spread and
-   * would be announced as a failing cell on a perfectly good pack. The safety
-   * check owns the comm error and will fault on it; balancing just waits.
+   * Judge the pack on this tick's own readings. A failed cell read reports
+   * 0mV, which looks like a 4V spread and would be announced as a failing
+   * cell on a perfectly good pack - so read first, then check that every
+   * transfer landed, and sit the tick out if not.
+   *
+   * The latch is cleared before the read because nothing else clears it in
+   * BMS_CHARGER_CONNECTED_NOT_CHARGING, where no safety check runs: an error
+   * latched there by anything at all - a session-timeout FET disable, one
+   * corrupted coulomb-counter read - parked balancing for the rest of the
+   * dock session. Nothing is lost by clearing it here; the safety checks
+   * clear it before their own reads anyway.
    */
+  bq7693_comm_clear_error();
+  v = bq7693_get_cell_voltages();
+
   if (!bq7693_comm_healthy())
   {
     bq7693_disable_balancing();
@@ -610,7 +620,6 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
     return;
   }
 
-  v = bq7693_get_cell_voltages();
   uint16_t  v_min = 0xFFFF;
   uint16_t  v_max = 0;
   uint8_t   max_cell = 0;
