@@ -697,6 +697,7 @@ static void bms_balance_leds(void)
 
   switch (bms_balance_status.state)
   {
+    case BQ_BALANCE_OV:      //one cell being bled down from the guard: same gesture
     case BQ_BALANCE_ACTIVE:
       //Steady left<->right sweep at reduced brightness.
       left = (((t / alt) & 1ul) == 0ul);
@@ -1680,16 +1681,12 @@ static void bms_handle_charger_connected_not_charging(void)
 
     bms_balance_leds();
 
-    if (bms_balance_overvoltage())
-    {
-      //A cell passed the guard with the charger still attached - make sure
-      //nothing can feed it, and hand over to the fault handler.
-      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-      bq7693_disable_charge();
-      bms_balance_stop();
-      bms_force_fault(BMS_ERR_OVERVOLTAGE);
-      return;
-    }
+    //A cell at the OV guard is bled on its own by the balancer, and nothing
+    //feeds it here: the charge FET is off in this state, and the top-up
+    //recheck below cannot start a charge while any cell is above
+    //CELL_FULL_CHARGE_RELEASE_VOLTAGE. This used to fault on it instead,
+    //which stopped the bleed and bounced FAULT <-> here every half minute
+    //until the cell self-discharged below the guard.
 
     /*
      * Re-check for a top-up periodically, not only after a standby wake.
@@ -1983,22 +1980,37 @@ static void bms_handle_charging(void)
           bms_balance_leds();
         }
       }
-      charge_pause_counter++;
+      if (bms_balance_overvoltage())
+      {
+        //A cell is at the OV guard: no more charge goes in. Count this as
+        //the last pause so the full-charge path below runs, rather than
+        //resuming and pausing again at CELL_FULL_CHARGE_VOLTAGE 50ms later.
+        BMS_PRINT("BMS:CHARGING OV guard, treating as full\r\n");
+        charge_pause_counter = FULL_CHARGE_PAUSE_COUNT;
+      }
+      else
+      {
+        charge_pause_counter++;
+      }
 
       //Balancing decisions are only valid on relaxed cells, so stop bleeding
-      //before the charge current comes back.
+      //before the charge current comes back. (Read the OV verdict above
+      //first - this resets it.)
       bms_balance_stop();
 
-      //Restart charging
-      port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
-      if (!bms_charge_fet_on())
+      if (charge_pause_counter < FULL_CHARGE_PAUSE_COUNT)
       {
-        port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-        bq7693_disable_charge();
-        leds_off();
-        bms_set_error(BMS_ERR_I2C_FAIL);
-        bms_state = BMS_FAULT;
-        return;
+        //Restart charging
+        port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
+        if (!bms_charge_fet_on())
+        {
+          port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+          bq7693_disable_charge();
+          leds_off();
+          bms_set_error(BMS_ERR_I2C_FAIL);
+          bms_state = BMS_FAULT;
+          return;
+        }
       }
     }
     else

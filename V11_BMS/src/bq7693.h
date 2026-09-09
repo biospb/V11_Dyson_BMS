@@ -111,7 +111,7 @@ typedef enum
   BQ_BALANCE_ACTIVE,     // one or more cells bleeding
   BQ_BALANCE_TOO_LOW,    // pack not near top of charge yet
   BQ_BALANCE_CELL_FAIL,  // a cell will not come up - refuse to bleed the healthy ones
-  BQ_BALANCE_OV,         // a cell hit the OV guard - caller must stop charging
+  BQ_BALANCE_OV,         // a cell hit the OV guard - it is being bled alone; caller must not charge
   BQ_BALANCE_TOO_HOT,    // pack above CELL_BALANCE_MAX_TEMP - balancing suspended
 } bq7693_balance_state_t;
 

@@ -652,11 +652,25 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
 
   // --- guards, most severe first -------------------------------------------
 
-  // A cell has run away. Stop bleeding everything and let the caller cut charge.
+  // A cell has reached the guard. The caller must not put charge in - but
+  // this is exactly the cell that most needs bleeding, so bleed it, alone.
+  // Refusing used to park the cell above the guard until self-discharge
+  // brought it down, days on a good cell, with the charge path faulting on
+  // it the whole time. One cell on its own cannot break the adjacency rule,
+  // and the AFE's own OV trip at CELL_OVERVOLTAGE_TRIP still sits above this.
   if (v_max >= CELL_BALANCE_OV_GUARD_MV)
   {
-    bq7693_disable_balancing();
-    status->state = BQ_BALANCE_OV;
+    uint8_t bit = (uint8_t)(1u << cb_bit[max_cell]);
+
+    bq7693_balance_latch = (uint8_t)(1u << max_cell);
+    if (cb_reg[max_cell] == CELLBAL1)
+      bq7693_set_balancing(bit, 0x00);
+    else
+      bq7693_set_balancing(0x00, bit);
+
+    status->cell_mask = (uint8_t)(1u << max_cell);
+    status->num_cells = 1;
+    status->state     = BQ_BALANCE_OV;
     return;
   }
 

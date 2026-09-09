@@ -146,8 +146,9 @@
 // healthy cells down to meet it would dump most of the pack as heat, so refuse.
 #define CELL_BALANCE_MAX_SPREAD_MV          300     //mV
 
-// Hard ceiling. If any cell reaches this, stop balancing and stop charging.
-// Must stay comfortably below CELL_OVERVOLTAGE_TRIP (4250mV).
+// Hard ceiling. If any cell reaches this, no more charge goes in, and that
+// cell alone is bled until it is back below. Must stay comfortably below
+// CELL_OVERVOLTAGE_TRIP (4250mV), which is the AFE's own trip.
 #define CELL_BALANCE_OV_GUARD_MV            4200    //mV
 
 // Balancing burns the imbalance off as heat inside the pack and runs unattended
