@@ -19,7 +19,27 @@
 
 //I2C address of the device
 #define BQ7693_ADDR 0x08
-#define BQ7693_TIMEOUT 100
+
+/*
+ * ASF's buffer_timeout is a busy-loop iteration count per byte, not a time.
+ * At 8MHz one iteration is ~10-15 cycles, so the previous value of 100
+ * (~150us) was about one byte time at 100kHz and only worked because the
+ * whole packet was retried on a timeout. 1000 (~1.5ms) is long enough that a
+ * byte which is actually being clocked never times out, and short enough
+ * that a wedged transfer costs milliseconds. SCL held low is caught by the
+ * hardware scl_low_timeout, not by this.
+ */
+#define BQ7693_I2C_BUFFER_TIMEOUT   1000
+
+/*
+ * Packet-level retries within one attempt, for a bus that reports BUSY right
+ * after the previous STOP. This used to be 100, underneath the 3 attempts
+ * below: with a slave that NACKs its address that was ~300 transfers and
+ * ~30ms per register, so a safety check on a dead bus ran for hundreds of
+ * milliseconds without a watchdog kick, tripped the early warning, and the
+ * fault was shown as BMS_ERR_WDT instead of BMS_ERR_I2C_FAIL.
+ */
+#define BQ7693_PACKET_RETRIES       10
 
 /* Max DATA bytes per read. The device interleaves a CRC byte after each,
    so the on-the-wire transfer is twice this. */

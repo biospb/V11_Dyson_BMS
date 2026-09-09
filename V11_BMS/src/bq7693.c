@@ -62,9 +62,12 @@ void bq7693_i2c_init()
   struct i2c_master_config config_i2c_master;
 
   i2c_master_get_config_defaults(&config_i2c_master);
-  config_i2c_master.buffer_timeout            = BQ7693_TIMEOUT;
-  config_i2c_master.unknown_bus_state_timeout = BQ7693_TIMEOUT;
-  config_i2c_master.inactive_timeout          = BQ7693_TIMEOUT;
+  config_i2c_master.buffer_timeout            = BQ7693_I2C_BUFFER_TIMEOUT;
+  config_i2c_master.unknown_bus_state_timeout = BQ7693_I2C_BUFFER_TIMEOUT;
+  /* This is an enum of CTRLA.INACTOUT values, not a count. The old value of
+     100 OR'd stray bits into CTRLA and left the timeout disabled anyway;
+     say so explicitly rather than change the behaviour. */
+  config_i2c_master.inactive_timeout          = I2C_MASTER_INACTIVE_TIMEOUT_DISABLED;
   config_i2c_master.pinmux_pad0               = PINMUX_PA16C_SERCOM1_PAD0;
   config_i2c_master.pinmux_pad1               = PINMUX_PA17C_SERCOM1_PAD1;
   config_i2c_master.scl_low_timeout           = true;
@@ -146,7 +149,7 @@ static bool bq7693_read_attempt(uint8_t addr, size_t len, uint8_t *buf)
   while (i2c_master_write_packet_wait(&i2c_master_instance, &packet) != STATUS_OK)
   {
     /* Increment timeout counter and check if timed out. */
-    if (timeout++ >= BQ7693_TIMEOUT)
+    if (timeout++ >= BQ7693_PACKET_RETRIES)
     {
       /* The register address never landed, so whatever the read phase
          returns is meaningless - this used to fall through as success. */
@@ -165,7 +168,7 @@ static bool bq7693_read_attempt(uint8_t addr, size_t len, uint8_t *buf)
     while (i2c_master_read_packet_wait(&i2c_master_instance, &packet) != STATUS_OK)
     {
       /* Increment timeout counter and check if timed out. */
-      if (timeout++ >= BQ7693_TIMEOUT)
+      if (timeout++ >= BQ7693_PACKET_RETRIES)
       {
         result = false;
         break;
@@ -278,7 +281,7 @@ static bool bq7693_write_attempt(uint8_t addr, uint8_t value)
   while (i2c_master_write_packet_wait(&i2c_master_instance, &packet) != STATUS_OK)
   {
     /* Increment timeout counter and check if timed out. */
-    if (timeout++ >= BQ7693_TIMEOUT)
+    if (timeout++ >= BQ7693_PACKET_RETRIES)
     {
       result = false;
       break;
