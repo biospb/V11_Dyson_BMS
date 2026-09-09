@@ -72,6 +72,17 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
  */
 #define SYS_STAT_POLL_MS        (250ul)
 
+/*
+ * How long bms_handle_idle() waits before re-trying a discharge arm that
+ * failed its safety check or its FET enable. The retry is what makes a
+ * transient (a momentary cell dip, one bad transfer) recoverable without
+ * re-plugging the cleaner, but retrying on every 50ms pass ran the whole
+ * check - seven cell reads and a log line per low cell - twenty times a
+ * second, which floods the debug queue and the bus for as long as the
+ * condition lasts.
+ */
+#define IDLE_DSG_RETRY_MS       (2000ul)
+
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL TYPES
 -----------------------------------------------------------------------------*/
@@ -1245,6 +1256,7 @@ static void bms_handle_idle(void)
   uint32_t sleep_time;
   bool vacuum_was_connected = false;
   bool trigger_was_pressed  = false;
+  sw_timer dsg_retry_timer  = 0;    // never started, so the first pass is immediate
 
   sw_timer_start(&bms_timer);
 
@@ -1255,19 +1267,28 @@ static void bms_handle_idle(void)
 
     if (vacuum_connected && !vacuum_was_connected)
     {
-      if (bms_is_safe_to_discharge())
+      if (sw_timer_is_elapsed(&dsg_retry_timer, IDLE_DSG_RETRY_MS))
       {
-        sw_timer_delay_ms(300);
-        /* the 300ms above pumps dsn_prot_mainloop(), which can time the
-           session out underneath us - do not arm the FET for a vacuum that
-           has since gone away */
-        if (dsn_prot_get_vacuum_connected())
+        if (bms_is_safe_to_discharge())
         {
-          /* only consume the edge once the FET is actually on; if either the
-             safety check or the enable itself failed we leave
-             vacuum_was_connected clear so the next pass retries, rather than
-             never arming discharge again for this idle stay */
-          vacuum_was_connected = bms_discharge_fet_on();
+          sw_timer_delay_ms(300);
+          /* the 300ms above pumps dsn_prot_mainloop(), which can time the
+             session out underneath us - do not arm the FET for a vacuum that
+             has since gone away */
+          if (dsn_prot_get_vacuum_connected())
+          {
+            /* only consume the edge once the FET is actually on; if either
+               the safety check or the enable itself failed we leave
+               vacuum_was_connected clear so a later pass retries, rather
+               than never arming discharge again for this idle stay */
+            vacuum_was_connected = bms_discharge_fet_on();
+          }
+        }
+
+        if (!vacuum_was_connected)
+        {
+          /* pace the retry - see IDLE_DSG_RETRY_MS */
+          sw_timer_start(&dsg_retry_timer);
         }
       }
     }
