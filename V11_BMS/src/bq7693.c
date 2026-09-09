@@ -253,6 +253,19 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
   for (attempt = 0u; (attempt < BQ7693_READ_ATTEMPTS) && !result; attempt++)
   {
     result = bq7693_read_attempt(addr, len, buf);
+
+    if (!result)
+    {
+      /*
+       * Only on the slow path. A safety check is ~9 registers and nothing
+       * inside it pumps the services; with every packet phase timing out at
+       * BQ7693_I2C_BUFFER_TIMEOUT the worst case is ~0.9s, past the 0.5s
+       * early warning, and the fault would be shown as BMS_ERR_WDT rather
+       * than I2C_FAIL. The retry budget is bounded, so kicking here cannot
+       * hide a genuinely stuck loop.
+       */
+      wdt_reset_count();
+    }
   }
 
   /* Only a transfer that failed every attempt counts as a comm error. A single
@@ -326,6 +339,11 @@ bool bq7693_write_register(uint8_t addr, uint8_t value)
   for (attempt = 0u; (attempt < BQ7693_WRITE_ATTEMPTS) && !result; attempt++)
   {
     result = bq7693_write_attempt(addr, value);
+
+    if (!result)
+    {
+      wdt_reset_count();   /* see bq7693_read_register() */
+    }
   }
 
   if (!result)
