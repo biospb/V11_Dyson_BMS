@@ -154,6 +154,8 @@ static bool    bms_afe_fault_is_real(uint8_t sys_stat, const char *who);
 static void    bms_blink_error_code(enum BMS_ERROR_CODE code);
 static void    bms_sys_stat_service(void);
 static uint8_t bms_sys_stat_take(void);
+static bool    bms_charge_fet_on(void);
+static bool    bms_discharge_fet_on(void);
 static void    bms_enter_standby(void);
 static void    bms_leave_standby(void);
 static void    rtc_standby_timer_init(void);
@@ -342,6 +344,44 @@ static uint8_t bms_sys_stat_take(void)
   system_interrupt_leave_critical_section();
 
   return faults;
+}
+
+/**
+ * @brief Clear latched faults through the owner, then drive the charge FET.
+ *
+ * The one place a charge enable goes through, so the result cannot be
+ * dropped. A failed enable latches the comm error, but the next safety check
+ * clears that latch before its own reads - so if the bus recovers in between,
+ * a caller that ignored this return would sit in BMS_CHARGING with the FET
+ * off and nothing would ever notice.
+ *
+ * @return false if the FET could not be driven.
+ */
+static bool bms_charge_fet_on(void)
+{
+  bms_sys_stat_service();
+
+  if (!bq7693_enable_charge())
+  {
+    BMS_PRINT("BMS:CHG_ENABLE_FAILED\r\n");
+    return false;
+  }
+
+  return true;
+}
+
+/** @brief As bms_charge_fet_on(), for the discharge FET. */
+static bool bms_discharge_fet_on(void)
+{
+  bms_sys_stat_service();
+
+  if (!bq7693_enable_discharge())
+  {
+    BMS_PRINT("BMS:DSG_ENABLE_FAILED\r\n");
+    return false;
+  }
+
+  return true;
 }
 
 /**
@@ -1199,19 +1239,11 @@ static void bms_handle_idle(void)
            has since gone away */
         if (dsn_prot_get_vacuum_connected())
         {
-          /* clear latched faults through the owner before re-enabling */
-          bms_sys_stat_service();
-
           /* only consume the edge once the FET is actually on; if either the
              safety check or the enable itself failed we leave
              vacuum_was_connected clear so the next pass retries, rather than
              never arming discharge again for this idle stay */
-          vacuum_was_connected = bq7693_enable_discharge();
-
-          if (!vacuum_was_connected)
-          {
-            BMS_PRINT("BMS:DSG_ENABLE_FAILED\r\n");
-          }
+          vacuum_was_connected = bms_discharge_fet_on();
         }
       }
     }
@@ -1667,9 +1699,14 @@ static void bms_handle_charging(void)
   //Enable charging.
   port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
   //Enable the charge FET in the BQ7693.
-  /* clear latched faults through the owner before re-enabling */
-  bms_sys_stat_service();
-  bq7693_enable_charge();
+  if (!bms_charge_fet_on())
+  {
+    port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+    bq7693_disable_charge();
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    bms_state = BMS_FAULT;
+    return;
+  }
 
   charge_pause_counter = 0;
 
@@ -1746,12 +1783,11 @@ static void bms_handle_charging(void)
       bms_balance_stop();
 
       // Re-enable discharge FET only if a vacuum is currently connected;
-      // otherwise leave it to the idle loop's vacuum-connect edge.
+      // otherwise leave it to the idle loop's vacuum-connect edge. A failure
+      // here is not fatal for the same reason: the idle loop re-arms it.
       if (dsn_prot_get_vacuum_connected() && bms_is_safe_to_discharge())
       {
-        /* clear latched faults through the owner before re-enabling */
-        bms_sys_stat_service();
-        bq7693_enable_discharge();
+        (void)bms_discharge_fet_on();
       }
 
       leds_off();
@@ -1790,9 +1826,7 @@ static void bms_handle_charging(void)
             bms_balance_stop();
             if (dsn_prot_get_vacuum_connected() && bms_is_safe_to_discharge())
             {
-              /* clear latched faults through the owner before re-enabling */
-              bms_sys_stat_service();
-              bq7693_enable_discharge();
+              (void)bms_discharge_fet_on();
             }
             leds_off();
             bms_state = BMS_CHARGER_UNPLUGGED;
@@ -1819,9 +1853,15 @@ static void bms_handle_charging(void)
 
       //Restart charging
       port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
-      /* clear latched faults through the owner before re-enabling */
-      bms_sys_stat_service();
-      bq7693_enable_charge();
+      if (!bms_charge_fet_on())
+      {
+        port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+        bq7693_disable_charge();
+        leds_off();
+        bms_set_error(BMS_ERR_I2C_FAIL);
+        bms_state = BMS_FAULT;
+        return;
+      }
     }
     else
     {
