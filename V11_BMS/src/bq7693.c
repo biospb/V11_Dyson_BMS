@@ -529,10 +529,13 @@ void bq7693_enter_sleep_mode(void)
 // absolute maximum ratings.
 //
 // cb_reg/cb_bit give the CELLBALn bit for each measured cell; cb_conflict is
-// the set of cells that must not bleed at the same time. Note cells 3 (CB4) and
-// 4 (CB6) sit in different registers - the datasheet rule does not formally
-// cover that pair - but VC5 is strapped to VC4 on this pack, so both bleed
-// currents would meet at one physical node. Treated as conflicting.
+// the set of cells that must not bleed at the same time. Two pairs are not
+// formally covered by the datasheet rule because they span the strapped,
+// unused inputs (SLUSBK2I Table 9-3, 7-cell column): VC5 is strapped to VC4,
+// so CB4 and CB6 both bleed into the cell-4 top node, and VC8/VC9 are strapped
+// to VC7, so CB7 and CB10 both bleed into the cell-6 top node. Neither pair
+// shares a pin, so this is conservative - but it is the same situation twice,
+// and it is treated the same way twice.
 
 static const uint8_t cb_reg[BQ7693_NUM_CELLS] =
 {
@@ -553,8 +556,8 @@ static const uint8_t cb_conflict[BQ7693_NUM_CELLS] =
   /* 2  CB3  */ (1u << 1) | (1u << 3),
   /* 3  CB4  */ (1u << 2) | (1u << 4),
   /* 4  CB6  */ (1u << 3) | (1u << 5),
-  /* 5  CB7  */ (1u << 4),
-  /* 6  CB10 */ 0
+  /* 5  CB7  */ (1u << 4) | (1u << 6),
+  /* 6  CB10 */ (1u << 5)
 };
 
 // Cells that were bleeding on the previous pass, for start/stop hysteresis.
