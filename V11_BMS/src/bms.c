@@ -1404,7 +1404,7 @@ static void bms_handle_sleep(void)
    * before bq7693_enter_sleep_mode() below. Every state that can shut the
    * pack down routes through here.
    */
-  if (eeprom_write() == 0)
+  if (eeprom_write())
   {
     serial_debug_send_message("BMS:EEPROM_WRITTEN\r\n");
   }

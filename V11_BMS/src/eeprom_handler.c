@@ -110,9 +110,11 @@ int eeprom_read(void)
 /**
  * @brief Compute CRC32 and write the EEPROM page, unless it is already current.
  *
- * @return 0 if the page was written, 1 if the stored values were identical.
+ * @return true if the page was written, false if the stored values were
+ *         already current. (Not the 0/-1 convention of eeprom_read(): this
+ *         is not a success code, neither outcome is a failure.)
  */
-int eeprom_write(void)
+bool eeprom_write(void)
 {
   /*
    * Skip the write when nothing worth storing has changed.
@@ -151,7 +153,7 @@ int eeprom_write(void)
 
     if (drift <= (int32_t)EEPROM_CHARGE_TOLERANCE_UAH)
     {
-      return 1;   //nothing worth a flash erase
+      return false;   //nothing worth a flash erase
     }
   }
 
@@ -168,7 +170,7 @@ int eeprom_write(void)
   eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
   eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
   eeprom_shadow_valid = true;
-  return 0;   //written
+  return true;   //written
 }
 
 /**
