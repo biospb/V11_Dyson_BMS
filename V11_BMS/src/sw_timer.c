@@ -34,7 +34,6 @@
     DEFINITION OF LOCAL VARIABLES
 -----------------------------------------------------------------------------*/
 static volatile uint32_t sw_timer_clock = 0;
-static volatile sw_timer delay_timer = 0;
 struct tc_module tc_instance;
 
 
@@ -212,12 +211,20 @@ sw_timer sw_timer_get_elapsed_time(sw_timer * sw_timer_ptr)
  */
 void sw_timer_delay_ms(uint32_t sw_timer_delay_ms)
 {
-  sw_timer_start((sw_timer *)&delay_timer);
+  /*
+   * A local, not a shared static. SW_TIMER_SERVICES() can call back into this
+   * function - anything in the service list that delays does - and with one
+   * shared timer a nested delay restarted it and then, on finishing, stopped
+   * it, so the outer delay returned the moment the inner one did.
+   */
+  sw_timer delay_timer = 0;
+
+  sw_timer_start(&delay_timer);
 
   do
   {
     SW_TIMER_SERVICES();
-  } while(false == sw_timer_is_elapsed((sw_timer *)&delay_timer, sw_timer_delay_ms));
+  } while(false == sw_timer_is_elapsed(&delay_timer, sw_timer_delay_ms));
 }
 
 /*-----------------------------------------------------------------------------

@@ -101,6 +101,7 @@
 #define RX_TIMEOUT_MS           5
 #define MOTOR_SPEED_WDT_MS      2000
 #define POWER_CYCLE_MS          1000
+#define SLEEP_SETTLE_MS         300    // after the sleep ack, before polling for a wake
 
 // TLV pair IDs used in analyze_frame response logic
 #define PAIR_TLV_READ           0x1002
@@ -148,6 +149,7 @@ typedef enum
   DSN_WAIT_FRAME,
   DSN_TX_FRAME,
   DSN_WAIT_TX,
+  DSN_SLEEP_PENDING,   // sleep ack sent, letting the cleaner settle
   DSN_SLEEP,
   DSN_POWER_CYCLE,
 } dsn_state_t;
@@ -181,6 +183,7 @@ static uint8_t    tx_length;
 static dsn_state_t dsn_state;
 static sw_timer    wait_timer;
 static sw_timer    session_timer;
+static sw_timer    sleep_timer;
 
 static bool        trigger_state;
 static bool        sleep_flag;
@@ -274,6 +277,18 @@ bool dsn_prot_get_vacuum_connected(void)
 /** @brief Protocol main loop — poll UART, process frames, manage session timeout. */
 void dsn_prot_mainloop(void)
 {
+  /*
+   * Not re-entrant. This is one of the SW_TIMER_SERVICES(), so anything that
+   * blocks in sw_timer_delay_ms() from inside a state - or from a callee such
+   * as bq7693_*() should that ever start delaying - arrives back here with
+   * dsn_state half-updated. Bail out rather than run the state machine twice.
+   */
+  static bool in_mainloop = false;
+
+  if (in_mainloop)
+    return;
+  in_mainloop = true;
+
   // Session timeout: no messages for 2 s -> disconnect
   if (sw_timer_is_elapsed(&session_timer, SESSION_TIMEOUT_MS))
   {
@@ -379,6 +394,18 @@ void dsn_prot_mainloop(void)
       break;
 
     //------------------------------------------------------------------------
+    case DSN_SLEEP_PENDING:
+      // Give the cleaner SLEEP_SETTLE_MS to shut down before its inputs are
+      // read as wake stimuli. Timed here rather than blocked in handle_sleep(),
+      // which would re-enter this function - see handle_sleep().
+      if (sw_timer_is_elapsed(&sleep_timer, SLEEP_SETTLE_MS))
+      {
+        dsn_state = DSN_SLEEP;
+        DSN_PRINT("PROT:SLEEP\r\n");
+      }
+      break;
+
+    //------------------------------------------------------------------------
     case DSN_SLEEP:
       /*
        * Wake stimuli: the mode button changing, the trigger, or the charger
@@ -406,6 +433,8 @@ void dsn_prot_mainloop(void)
       dsn_state = DSN_INIT;
       break;
   }
+
+  in_mainloop = false;
 }
 
 //-----------------------------------------------------------------------------
@@ -1097,17 +1126,16 @@ static void handle_sleep(void)
    * quiescent draw actually matters.
    */
   /*
-   * sw_timer_delay_ms, not the ASF delay_ms: this runs from
-   * dsn_prot_mainloop(), which is itself called from SW_TIMER_SERVICES().
-   * The ASF systick spin does not pump the services, so it does not kick the
-   * watchdog either. bms_wdt_mainloop() kicks every 250ms and the early
-   * warning fires at 512 clocks of a 1024Hz clock = 500ms, so a 300ms block
-   * arriving 250ms after the last kick reaches 550ms and trips
-   * bms_force_fault(BMS_ERR_WDT) on a perfectly healthy system.
+   * The settle time before DSN_SLEEP is timed by the state machine, not
+   * blocked here. This runs from dsn_prot_mainloop(), which is one of the
+   * SW_TIMER_SERVICES(): the ASF delay_ms() spins without pumping them and
+   * starved the watchdog, and sw_timer_delay_ms() pumps them - which called
+   * straight back into dsn_prot_mainloop() with dsn_state still DSN_TX_FRAME.
+   * That re-sent the last response frame and then ran the handshake parser for
+   * the whole 300ms, until this function returned and overwrote the state.
    */
-  sw_timer_delay_ms(300);
-  dsn_state = DSN_SLEEP;
-  DSN_PRINT("PROT:SLEEP\r\n");
+  sw_timer_start(&sleep_timer);
+  dsn_state = DSN_SLEEP_PENDING;
 }
 
 //-----------------------------------------------------------------------------
