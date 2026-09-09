@@ -162,10 +162,13 @@ Off the charger, the fault display gives up after `FAULT_DISPLAY_TIME`
 itself further into the ground. Pulling the trigger leaves the fault state
 immediately.
 
-On the charger the pack keeps blinking and re-checks every `FAULT_RETRY_MS`
-(5 seconds) whether it is safe to charge; as soon as it is, charging starts.
-That is how a flat pack recovers, and it is why a pack that is too hot to
-charge shows the "too hot" pattern on the dock until it has cooled.
+On the charger the pack does not shut down. It re-checks every
+`FAULT_RETRY_MS` (5 seconds) whether it is safe to charge, and starts charging
+as soon as it is. That is how a flat pack recovers, and it is why a pack that
+is too hot to charge shows the "too hot" pattern on the dock until it has
+cooled. The blinking still stops after `FAULT_DISPLAY_TIME` - the LEDs run
+from the cells while the charge FET is off - but the re-check continues.
+Pull the trigger to see the code again.
 
 ## License
 

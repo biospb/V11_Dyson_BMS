@@ -1560,8 +1560,15 @@ static void bms_handle_fault(void)
 
   while (1)
   {
-    // Blink the error code, then pause so the user can read the pattern.
-    bms_blink_error_code(bms_error);
+    /* Sticky once true: sw_timer_is_elapsed() stops the timer when it fires
+       and a stopped timer reads as elapsed from then on. */
+    const bool display_over = sw_timer_is_elapsed(&fault_timer, (uint32_t)FAULT_DISPLAY_TIME * 1000ul);
+
+    if (!display_over)
+    {
+      // Blink the error code, then pause so the user can read the pattern.
+      bms_blink_error_code(bms_error);
+    }
     sw_timer_delay_ms(FAULT_BLINK_REPEAT_MS);
     wdt_reset_count();
 
@@ -1582,6 +1589,14 @@ static void bms_handle_fault(void)
        * for PACK_DISCHARGED and UNDERVOLTAGE, and bms_is_safe_to_charge()
        * passes both. So this applies to every code, not just the
        * self-recovering ones.
+       *
+       * A code the charge path can never clear - a broken cell tap, a dead
+       * bus - keeps the pack here for as long as it is docked. That is
+       * deliberate: SHIP mode with the charger attached may not remove
+       * power. But the LEDs do go quiet after FAULT_DISPLAY_TIME, because
+       * with the charge FET off they run from the cells, and blinking a
+       * flat pack for days is exactly what the timeout exists to prevent.
+       * Pulling the trigger shows the code again.
        */
       if (retry_due)
       {
@@ -1599,14 +1614,13 @@ static void bms_handle_fault(void)
            least the original code - a worse finding is shown, not hidden */
       }
     }
-    else if (sw_timer_is_elapsed(&fault_timer, (uint32_t)FAULT_DISPLAY_TIME * 1000ul))
+    else if (display_over)
     {
       /* The user has had long enough to read the code. Shut the pack down
          rather than blinking forever - which on a flat pack means draining
          it further - and let bms_handle_sleep() commit the charge level.
-         Off the charger only: SHIP mode with the charger attached may not
-         remove power (see bms_handle_sleep), and a docked pack is better
-         off re-checking above until it can charge. */
+         Off the charger only: on the dock the display stops but the
+         re-check above carries on, see there. */
       BMS_PRINT("BMS:FAULT display timeout, sleeping\r\n");
       bms_state = BMS_SLEEP;
       return;
