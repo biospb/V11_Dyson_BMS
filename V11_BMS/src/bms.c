@@ -106,6 +106,14 @@ static volatile uint8_t bms_sys_stat_faults = 0;
    Decays after BQ_AFE_FAULT_DECAY_MS without one. */
 static uint8_t  bms_afe_fault_count = 0;
 static sw_timer bms_afe_fault_timer = 0;
+/*
+ * Set when an AFE event is absorbed. The AFE has already dropped BOTH FET
+ * drivers for it (SLUSBK2I Table 8-1) and never re-enables one on its own, so
+ * the state that owns a FET has to turn it back on - otherwise "absorbed"
+ * means charging stops silently, or the motor drops out with the trigger
+ * still reported as pulled. Consumed by bms_afe_fet_dropped().
+ */
+static bool     bms_afe_fet_dropped_flag = false;
 static sw_timer bms_sys_stat_timer = 0;
 static volatile bool rtc_wakeup_flag = false;
 static struct rtc_module rtc_instance;
@@ -151,6 +159,7 @@ static void    bms_handle_charging(void);
 static void    bms_handle_charger_unplugged(void);
 static bool    bms_fault_pending(void);
 static bool    bms_afe_fault_is_real(uint8_t sys_stat, const char *who);
+static bool    bms_afe_fet_dropped(void);
 static void    bms_blink_error_code(enum BMS_ERROR_CODE code);
 static void    bms_sys_stat_service(void);
 static uint8_t bms_sys_stat_take(void);
@@ -359,6 +368,8 @@ static uint8_t bms_sys_stat_take(void)
  */
 static bool bms_charge_fet_on(void)
 {
+  /* about to (re)assert it anyway, so a pending drop is dealt with */
+  bms_afe_fet_dropped_flag = false;
   bms_sys_stat_service();
 
   if (!bq7693_enable_charge())
@@ -373,6 +384,7 @@ static bool bms_charge_fet_on(void)
 /** @brief As bms_charge_fet_on(), for the discharge FET. */
 static bool bms_discharge_fet_on(void)
 {
+  bms_afe_fet_dropped_flag = false;
   bms_sys_stat_service();
 
   if (!bq7693_enable_discharge())
@@ -382,6 +394,15 @@ static bool bms_discharge_fet_on(void)
   }
 
   return true;
+}
+
+/** @brief True once if an absorbed AFE event has dropped the FETs since the last enable. */
+static bool bms_afe_fet_dropped(void)
+{
+  bool dropped = bms_afe_fet_dropped_flag;
+
+  bms_afe_fet_dropped_flag = false;
+  return dropped;
 }
 
 /**
@@ -793,6 +814,9 @@ static bool bms_afe_fault_is_real(uint8_t sys_stat, const char *who)
   if (bms_afe_fault_count < BQ_AFE_FAULT_TOLERANCE)
   {
     bms_afe_fault_count++;
+    /* the AFE turned both FETs off for this - whoever owns one must
+       re-assert it, see bms_afe_fet_dropped() */
+    bms_afe_fet_dropped_flag = true;
     BMS_PRINT("%s: AFE fault 0x%02X absorbed %u/%u\r\n", who,
               (unsigned)(sys_stat & (STAT_DEVICE_XREADY | STAT_OVRD_ALERT)),
               bms_afe_fault_count, BQ_AFE_FAULT_TOLERANCE);
@@ -1363,6 +1387,16 @@ static void bms_handle_vacuum_running(void)
     bms_state = BMS_FAULT;
     return;
   }
+
+  //An absorbed AFE transient has taken DSG_ON away - put it back before
+  //telling the cleaner it may run.
+  if (bms_afe_fet_dropped() && !bms_discharge_fet_on())
+  {
+    dsn_prot_set_trigger(false);
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    bms_state = BMS_FAULT;
+    return;
+  }
   dsn_prot_set_trigger(true);
 
   while (1)
@@ -1370,6 +1404,14 @@ static void bms_handle_vacuum_running(void)
     if (!bms_is_safe_to_discharge())
     {
       dsn_prot_set_trigger(false);
+      bms_state = BMS_FAULT;
+      return;
+    }
+
+    if (bms_afe_fet_dropped() && !bms_discharge_fet_on())
+    {
+      dsn_prot_set_trigger(false);
+      bms_set_error(BMS_ERR_I2C_FAIL);
       bms_state = BMS_FAULT;
       return;
     }
@@ -1770,6 +1812,19 @@ static void bms_handle_charging(void)
 
       bms_balance_stop();
       leds_off();
+      bms_state = BMS_FAULT;
+      return;
+    }
+
+    //An absorbed AFE transient has taken CHG_ON away. Nothing else in this
+    //loop re-enables it, so without this the charge just stops.
+    if (bms_afe_fet_dropped() && !bms_charge_fet_on())
+    {
+      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+      bq7693_disable_charge();
+      bms_balance_stop();
+      leds_off();
+      bms_set_error(BMS_ERR_I2C_FAIL);
       bms_state = BMS_FAULT;
       return;
     }
