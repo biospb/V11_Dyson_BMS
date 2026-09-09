@@ -1287,6 +1287,22 @@ static void bms_handle_idle(void)
     bool vacuum_connected = dsn_prot_get_vacuum_connected();
     bool trigger_pressed  = bms_trigger_active();
 
+    /*
+     * Discharge is armed, and an AFE event has been latched since. The AFE
+     * dropped DSG_ON for it (SLUSBK2I Table 8-1), and no safety check runs
+     * in this state to absorb the event and re-arm - the cleaner just lost
+     * its supply and would only get it back through a session timeout and
+     * reconnect. Forget the arm instead, so the edge logic below re-runs
+     * the check, which absorbs (or faults) the event and re-enables the
+     * FET. Peeked rather than taken: the check is what consumes it.
+     */
+    if (vacuum_was_connected
+        && ((bms_sys_stat_faults & (STAT_DEVICE_XREADY | STAT_OVRD_ALERT)) != 0u))
+    {
+      BMS_PRINT("BMS:IDLE AFE event, re-arming discharge\r\n");
+      vacuum_was_connected = false;
+    }
+
     if (vacuum_connected && !vacuum_was_connected)
     {
       if (sw_timer_is_elapsed(&dsg_retry_timer, IDLE_DSG_RETRY_MS))
