@@ -57,21 +57,29 @@ static void bms_wdt_early_warning_callback(void);
  * Configures WDT with a 16384-clock timeout, registers an early-warning
  * callback that shuts down charge/discharge FETs, and starts the
  * periodic kick timer.
+ *
+ * @return the status of wdt_set_config(). Returned rather than discarded
+ *         because a caller that then stops kicking the dog is relying on this
+ *         having worked, and a silent failure there is indistinguishable from
+ *         a hung pack.
  */
-void bms_wdt_init(void)
+enum status_code bms_wdt_init(void)
 {
 	struct wdt_conf config_wdt;
+	enum status_code status;
 
 	wdt_get_config_defaults(&config_wdt);
     config_wdt.clock_source         = GCLK_GENERATOR_2;
 	config_wdt.timeout_period       = WDT_PERIOD_1024CLK;
 	config_wdt.early_warning_period = WDT_PERIOD_512CLK;
-	wdt_set_config(&config_wdt);
+	status = wdt_set_config(&config_wdt);
 
   wdt_register_callback(bms_wdt_early_warning_callback, WDT_CALLBACK_EARLY_WARNING);
   wdt_enable_callback(WDT_CALLBACK_EARLY_WARNING);
 
   sw_timer_start(&wdt_timer);
+
+  return status;
 }
 
 /**

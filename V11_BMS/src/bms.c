@@ -1625,13 +1625,33 @@ static void bms_handle_sleep(void)
   uint8_t probe;
   if (!bq7693_read_register(SYS_STAT, 1, &probe))
   {
-    /* Bus gone: SHIP took after all and we are living on borrowed charge.
-       Park here and let the supply finish collapsing. */
-    bms_wdt_init();
-    while(1)
+    /*
+     * Bus gone. Either SHIP took and the supply is about to collapse, in which
+     * case nothing below completes anyway, or the bus died on its own while
+     * the pack stayed powered.
+     *
+     * This used to be a while(1) with the watchdog re-armed and unkicked, on
+     * the theory that surviving would reset us back through bms_init(). It
+     * does not: bms_wdt_init()'s status was discarded, and a pack that reached
+     * here sat silent, powered and executing nothing until someone reflashed
+     * it - which looks exactly like a dead pack and is not distinguishable
+     * from one without a debugger.
+     *
+     * Reset explicitly instead. NVIC_SystemReset() needs nothing to have been
+     * configured correctly and cannot quietly not happen.
+     */
+    if (bms_wdt_init() != STATUS_OK)
     {
-      /* deliberately no wdt_reset_count() */
+      serial_debug_send_message("BMS:WDT_REARM_FAILED\r\n");
     }
+
+    serial_debug_send_message("BMS:SHIP_NO_BUS, resetting\r\n");
+
+    /* Let the queue drain - serial_debug_process() moves one byte per call,
+       and the message above is worth more than the 200ms it costs. */
+    sw_timer_delay_ms(200);
+
+    NVIC_SystemReset();
   }
 
   serial_debug_send_message("BMS:SHIP_REFUSED, staying awake\r\n");
