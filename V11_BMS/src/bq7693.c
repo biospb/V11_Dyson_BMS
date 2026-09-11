@@ -576,12 +576,28 @@ int bq7693_get_pack_voltage(void)
   return bq7693_pack_voltage;
 }
 
-/** @brief Put BQ7693 into SHIP mode (deep sleep). */
-void bq7693_enter_sleep_mode(void)
+/**
+ * @brief Put BQ7693 into SHIP mode (deep sleep).
+ *
+ * SLUSBK2I 8.3.1.3: the sequence is [SHUT_A=0,SHUT_B=0], [0,1], [1,0], and
+ * SYS_CTRL1 carries SHUT_A in bit 1 and SHUT_B in bit 0.
+ *
+ * @return false if any of the three writes was not accepted. A true return
+ *         does NOT mean the device shut down - it means it was asked
+ *         correctly. The AFE declines while its BOOT pin is held high, and
+ *         says nothing about having declined; the caller has to notice that
+ *         it is still running. Note also that the sequence clears ADC_EN,
+ *         so a caller that survives has to put SYS_CTRL1 back.
+ */
+bool bq7693_enter_sleep_mode(void)
 {
-  bq7693_write_register(SYS_CTRL1, 0x00);
-  bq7693_write_register(SYS_CTRL1, 0x01);
-  bq7693_write_register(SYS_CTRL1, 0x02);
+  bool ok = true;
+
+  ok &= bq7693_write_register(SYS_CTRL1, 0x00);
+  ok &= bq7693_write_register(SYS_CTRL1, 0x01);
+  ok &= bq7693_write_register(SYS_CTRL1, 0x02);
+
+  return ok;
 }
 
 //-----------------------------------------------------------------------------

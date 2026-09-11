@@ -95,7 +95,7 @@ bool bq7693_enable_discharge(void);
 void bq7693_disable_charge(void);
 void bq7693_disable_discharge(void);
 
-void bq7693_enter_sleep_mode(void);
+bool bq7693_enter_sleep_mode(void);
 
 /* Return false if the register could not be read; *cc is untouched then. */
 bool bq7693_read_cc(int16_t *cc);

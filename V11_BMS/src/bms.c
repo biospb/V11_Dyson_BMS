@@ -1599,21 +1599,54 @@ static void bms_handle_sleep(void)
    */
   bms_debug_dump_pins("ship");
 
-  bq7693_enter_sleep_mode();
+  if (!bq7693_enter_sleep_mode())
+  {
+    serial_debug_send_message("BMS:SHIP_WRITE_FAILED\r\n");
+  }
 
   /*
-   * We are about to get powered down - but only if SHIP mode actually removes
-   * power. If it does not (charger still attached, BOOT held, or the write
-   * simply did not land) this used to spin forever with the watchdog
-   * deinitialised, leaving the pack bricked until the cells were physically
-   * disturbed. Re-arm the watchdog and stop kicking it, so an unexpected
-   * survival resets us back through bms_init() instead.
+   * If SHIP took, REGOUT is gone and nothing below this line ever runs.
+   *
+   * If it did not, we are still here - and that is not an exotic case. The
+   * BQ7693 declines SHIP while its BOOT pin is held high, which is exactly
+   * what a pack sitting in the cleaner with the mode button pressed looks
+   * like, and it gives no indication of having declined. The giveaway is that
+   * the bus still answers.
+   *
+   * This used to end in a while(1) that relied on the watchdog to reset out of
+   * it. That is not a recovery: it leaves the pack apparently dead for a
+   * second at a time, and it depends on a watchdog re-arm whose return value
+   * nobody checks. Detect the refusal and go back to idling instead, which
+   * keeps the pack answering its cleaner, keeps it reachable over SWD, and
+   * lets it retry the moment whatever is holding BOOT lets go.
    */
-  bms_wdt_init();
-  while(1)
+  delay_ms(250);
+
+  uint8_t probe;
+  if (!bq7693_read_register(SYS_STAT, 1, &probe))
   {
-    /* deliberately no wdt_reset_count() here */
+    /* Bus gone: SHIP took after all and we are living on borrowed charge.
+       Park here and let the supply finish collapsing. */
+    bms_wdt_init();
+    while(1)
+    {
+      /* deliberately no wdt_reset_count() */
+    }
   }
+
+  serial_debug_send_message("BMS:SHIP_REFUSED, staying awake\r\n");
+
+  /* The SHIP sequence cleared ADC_EN on its way past - without this the AFE
+     stops converting and every cell voltage reads zero from here on. */
+  bq7693_write_register(SYS_CTRL1, SYS_CTRL1_RUN);
+
+  /* Undo the power-down preparation, in reverse. */
+  pins_init();
+  leds_init();
+  dio_init();
+  bms_wdt_init();
+
+  bms_state = BMS_IDLE;
 }
 
 /** @brief Vacuum running: monitor safety while trigger held and vacuum connected. */
