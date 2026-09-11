@@ -578,21 +578,29 @@ void bms_mainloop(void)
         //Initial debug blurb
         serial_debug_send_message("Dyson V11/V15 BMS After market firmware " FW_GIT_REV "\r\n");
         /*
-         * An attached debugger keeps SWDIO driven, which forward-biases that
-         * pin's ESD clamp into the VDD rail once REGOUT goes and parks it near
-         * 600mV - not enough to run the MCU, enough to stop it powering down
-         * cleanly. The pack then looks dead: silent, still reachable over SWD,
-         * and unwakeable by button or charger. It cost two separate evenings
-         * of chasing a firmware bug that was a probe lead, so say so out loud.
+         * A physically attached debugger keeps SWDIO driven, which
+         * forward-biases that pin's ESD clamp into the VDD rail once REGOUT
+         * goes and parks it near 600mV - not enough to run the MCU, enough to
+         * stop it powering down cleanly. The pack then looks dead: silent,
+         * still reachable over SWD, unwakeable by button or charger. It cost
+         * two separate rounds of chasing a firmware bug that was a probe lead,
+         * so it is worth a line in the log.
          *
-         * DSU.STATUSB.DBGPRES is the SAM D20 cold-plug/hot-plug indication,
-         * readable from software; it says nothing about whether anyone is
-         * actively debugging, only that the port is connected - which is
-         * exactly the condition that matters here.
+         * Read what DBGPRES actually is, though. It latches when the debug
+         * interface is powered up and stays latched until the part loses power
+         * - a reset, including the one a programmer issues after flashing,
+         * does not clear it. So it reports "a debugger has been attached since
+         * this pack was last powered up", NOT "a debugger is attached now",
+         * and the wording has to match or it sends people looking for a cable
+         * they already unplugged.
+         *
+         * That is also why nothing is gated on it. Refusing SHIP here looked
+         * sensible for about ten minutes and then stopped a pack from ever
+         * sleeping again after a single flash.
          */
         if (DSU->STATUSB.bit.DBGPRES)
         {
-          serial_debug_send_message("BMS:DEBUGGER_ATTACHED - unplug it before testing sleep\r\n");
+          serial_debug_send_message("BMS:DEBUGGER_SEEN since power-up - if still plugged in, sleep will misbehave\r\n");
         }
         /* eeprom_init() runs before serial_debug_init(), which clears the
            queue, so it cannot report this itself - see eeprom_was_reset(). */
@@ -1646,28 +1654,6 @@ static void bms_handle_idle(void)
 /** @brief Sleep: save EEPROM, disable FETs, enter BQ7693 SHIP mode. */
 static void bms_handle_sleep(void)
 {
-  /*
-   * Do not attempt SHIP with a debugger on the port.
-   *
-   * SWDIO stays driven while the adapter is connected, so once REGOUT goes
-   * that pin's ESD clamp holds the rail near 600mV: too little to run the
-   * MCU, too much for it to be off. The pack ends up silent, unwakeable by
-   * button or charger, and looking broken in a way that points convincingly
-   * at firmware.
-   *
-   * Nothing is lost by skipping it. A pack on the bench with a programmer
-   * attached is not conserving charge for anyone, and SHIP could not have
-   * completed properly anyway - so stay awake, stay answering, and let the
-   * next idle timeout try again once the adapter is unplugged.
-   */
-  if (DSU->STATUSB.bit.DBGPRES)
-  {
-    serial_debug_send_message("BMS:DEBUGGER_ATTACHED, not entering SHIP\r\n");
-    (void)eeprom_write();
-    bms_state = BMS_IDLE;
-    return;
-  }
-
 #if !SHIP_MODE_ENABLE
   /*
    * Bench mode - see SHIP_MODE_ENABLE. Commit what we would have committed on
