@@ -1566,9 +1566,20 @@ static void bms_handle_sleep(void)
   bq7693_disable_discharge();
 
   leds_sequence();
-  /* Not leds_off(): the pins have to come off the TC and be held low as GPIO
-     before REGOUT goes, or they are released mid-PWM and glow. See there. */
-  leds_deinit();
+
+  /*
+   * The fade ends at zero duty and that is all the parking the LEDs need.
+   *
+   * If they appear faintly lit after the pack has powered down, check what is
+   * still plugged into the programming header before suspecting this code: a
+   * connected debugger keeps SWDIO driven, which forward-biases that pin's ESD
+   * clamp into the dead VDD rail and holds it around 600mV. Enough to bias the
+   * LED drivers, nowhere near enough to run the MCU. Unplug the adapter and it
+   * goes away.
+   *
+   * Nothing here can affect it either way - once REGOUT is gone every pin is
+   * high impedance regardless of what was last written to it.
+   */
 
   pins_deinit();
 
