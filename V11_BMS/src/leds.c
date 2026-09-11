@@ -29,6 +29,24 @@
 -----------------------------------------------------------------------------*/
 //speed of LED sequence
 #define LED_SEQ_TIME          25
+/*
+ * NB these two do not describe what the hardware actually does, and the
+ * brightness they produce is fine, so they are left alone - but do not read
+ * them as fact.
+ *
+ * TC_WAVE_GENERATION_NORMAL_PWM fixes the period at the counter's own maximum:
+ * 0xFFFF for the 16-bit mode leds_init() selects. CAPTURE_VALUE is never
+ * written as a TOP - nothing here writes TOP at all - so the real PWM
+ * frequency is 8MHz / 65536 = 122Hz, not the 200Hz below, and the "100%" of
+ * leds_on() and leds_set_led_duty() is 40000 / 65536 = 61% duty.
+ *
+ * Consistent across every LED and every call, so the relative brightness of
+ * the fades and blink codes is exactly as intended. duty_ppt is likewise
+ * misnamed - it is treated as a percentage throughout.
+ *
+ * Fixing it (TC_WAVE_GENERATION_MATCH_PWM with CAPTURE_VALUE as CC0) would
+ * make every pattern brighter, which nobody asked for.
+ */
 #define TIMRER_FREQ_HZ        (8000000ul)
 #define PWM_FREQ_HZ           (200ul)
 #define CAPTURE_VALUE         (TIMRER_FREQ_HZ / PWM_FREQ_HZ)

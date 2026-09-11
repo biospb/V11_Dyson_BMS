@@ -1028,8 +1028,23 @@ static void pins_deinit(void)
   port_pin_set_output_level(PIN_PA25, false);
 #endif
   port_pin_set_output_level(PIN_PA03, false);
-  port_pin_set_output_level(MODE_BUTTON_PULLUP_ENABLE_PIN, false);
   port_pin_set_output_level(PRECHARGE_PIN, false);
+
+  /*
+   * MODE_BUTTON_PULLUP_ENABLE_PIN is deliberately NOT driven low here.
+   *
+   * It supplies the rail the mode button switches - see handle_sleep() in
+   * dsn_protocol.c, which keeps it on for exactly that reason - so driving it
+   * low disconnects the button from everything. This used to happen about a
+   * second before bq7693_enter_sleep_mode(), leaving the button dead through
+   * the whole power-down, including the moment REGOUT collapses.
+   *
+   * The draw it was saving is imaginary. This runs immediately before SHIP,
+   * and once REGOUT is gone the pin is high impedance whether it was driven
+   * high or low - a GPIO with no supply does not hold a level. All the write
+   * bought was a guaranteed-dead button during the only window where the
+   * button might still have reached the AFE BOOT pin.
+   */
 }
 
 /**
@@ -1531,6 +1546,17 @@ static void bms_handle_idle(void)
 /** @brief Sleep: save EEPROM, disable FETs, enter BQ7693 SHIP mode. */
 static void bms_handle_sleep(void)
 {
+#if !SHIP_MODE_ENABLE
+  /*
+   * Bench mode - see SHIP_MODE_ENABLE. Commit what we would have committed on
+   * the way down, then carry on idling rather than taking the one-way trip.
+   */
+  serial_debug_send_message("BMS:SHIP_DISABLED, staying awake\r\n");
+  (void)eeprom_write();
+  bms_state = BMS_IDLE;
+  return;
+#endif
+
   bms_wdt_deinit();
   serial_debug_send_message("BMS:GOING_TO_SLEEP\r\n");
   //CELLBAL must be cleared before SHIP mode - the BQ7693 re-enters NORMAL with
@@ -1563,6 +1589,15 @@ static void bms_handle_sleep(void)
   {
     serial_debug_send_message("BMS:EEPROM_UNCHANGED\r\n");
   }
+
+  /*
+   * Last thing in the log before the lights go out, and the only record of
+   * what the wake sources were doing at the moment it mattered. A pack that
+   * does not come back is otherwise silent about why: BOOT is driven from the
+   * board, not from here, so if CHARGER or the trigger were already asserted
+   * when this ran, whatever edge would have woken the AFE has been and gone.
+   */
+  bms_debug_dump_pins("ship");
 
   bq7693_enter_sleep_mode();
 

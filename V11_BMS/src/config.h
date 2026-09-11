@@ -93,6 +93,21 @@
 // to IDLE_TIME) to keep a pack awake on the bench.
 #define IDLE_NO_VACUUM_TIME                 20      // seconds
 
+// Set to 0 to stop the pack ever entering SHIP mode.
+//
+// SHIP is a one-way trip from the firmware's point of view: it removes REGOUT,
+// the MCU loses power, the I2C bus dies with it, and the ONLY way back is the
+// BQ7693 BOOT pin. Nothing this firmware does can bring the pack back, and
+// neither can a programmer - SWD needs a powered core. On a pack whose wake
+// path is damaged, or one being worked on where the button is held down and
+// therefore never changes, that is indistinguishable from a dead pack.
+//
+// With this at 0 bms_handle_sleep() commits the charge level and returns to
+// idle instead. The pack then never powers down and will flatten itself given
+// enough time - that is the whole reason SHIP exists - so this is a bench
+// setting, not a shipping one.
+#define SHIP_MODE_ENABLE                    1
+
 // How long BMS_FAULT keeps blinking its error code before giving up and going
 // to SHIP mode. Without this the fault state loops forever - which for
 // BMS_ERR_PACK_DISCHARGED means an already-empty pack sits there running the
