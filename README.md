@@ -119,7 +119,49 @@ Capacity is clamped to 120% of `PACK_MAX_CAPACITY_MAH` to reject outliers.
 
 ### Factory Reset (EEPROM Defaults)
 
-While the battery is actively charging, press the trigger **20 times within 2 seconds**. The left error LED will blink 10 times to confirm the reset. This restores the default capacity and charge level values.
+Two ways, and they reach different situations.
+
+**By trigger.** While the battery is actively charging, press the trigger
+**20 times, with no more than 2 seconds between presses** - the timeout is
+re-armed on every press, so this is a comfortable tapping pace, not 20 presses
+inside a 2-second window. The left error LED blinks 10 times to confirm. This
+restores the default capacity and charge level.
+
+**By reflashing.** The stored page carries `EEPROM_MAGIC`
+(`eeprom_handler.h`); `eeprom_init()` keeps stored data only if it matches and
+writes defaults otherwise. Bump the low byte whenever a change makes
+previously stored values wrong - the struct layout changed, or a field kept its
+type but changed meaning - and the first boot after flashing resets the gauge
+on its own. `BMS:EEPROM_RESET_TO_DEFAULTS` appears in the debug log when it
+fires.
+
+This is the only route that reaches a bad charge level already sitting in
+flash, because **programming the MCU does not erase the emulated EEPROM**: it
+lives in NVM rows reserved by the fuse (`eep` in the linker script), which the
+programmer does not touch. A fault that zeroed the gauge on its way down
+therefore survives a reflash, and a capacity learned from that zero would be
+wrong until the next full discharge-to-charge cycle.
+
+## Charging Indication
+
+| LEDs | Meaning |
+|------|---------|
+| Both fading smoothly in and out | Charging, and current is actually flowing |
+| One LED blinking on/off, twice a second | Charge is commanded, but no current is flowing |
+| Both on together for 1 second, then off | Charger connected, pack already full |
+
+The one-LED blink means the firmware has done everything it can - the safety
+checks passed, `ENABLE_CHARGE_PIN` is asserted, `CHG_ON` was written to the
+BQ7693 - and the coulomb counter still reads below `CHARGE_CURRENT_MIN_MA`
+after `CHARGE_CURRENT_GRACE_MS`. Look outside the firmware: the charger, the
+dock contacts, the charge FET and its gate drive, or a board variant whose
+charge-enable is not on the pin in `config.h`.
+
+It is deliberately **not** a fault. The pack stays in the charging state and
+keeps trying, because a charger that starts late must still be allowed to
+start; the indication clears by itself the moment current appears.
+`BMS:CHARGING current ABSENT` / `... flowing` mark the transitions in the debug
+log.
 
 ## Fault Codes
 
