@@ -577,6 +577,23 @@ void bms_mainloop(void)
 #if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
         //Initial debug blurb
         serial_debug_send_message("Dyson V11/V15 BMS After market firmware " FW_GIT_REV "\r\n");
+        /*
+         * An attached debugger keeps SWDIO driven, which forward-biases that
+         * pin's ESD clamp into the VDD rail once REGOUT goes and parks it near
+         * 600mV - not enough to run the MCU, enough to stop it powering down
+         * cleanly. The pack then looks dead: silent, still reachable over SWD,
+         * and unwakeable by button or charger. It cost two separate evenings
+         * of chasing a firmware bug that was a probe lead, so say so out loud.
+         *
+         * DSU.STATUSB.DBGPRES is the SAM D20 cold-plug/hot-plug indication,
+         * readable from software; it says nothing about whether anyone is
+         * actively debugging, only that the port is connected - which is
+         * exactly the condition that matters here.
+         */
+        if (DSU->STATUSB.bit.DBGPRES)
+        {
+          serial_debug_send_message("BMS:DEBUGGER_ATTACHED - unplug it before testing sleep\r\n");
+        }
         /* eeprom_init() runs before serial_debug_init(), which clears the
            queue, so it cannot report this itself - see eeprom_was_reset(). */
         if (eeprom_was_reset())
