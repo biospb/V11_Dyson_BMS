@@ -18,6 +18,14 @@ volatile struct eeprom_data eeprom_data;
 static struct eeprom_data eeprom_shadow;
 static bool eeprom_shadow_valid = false;
 
+/*
+ * Set when eeprom_init() rejected the stored page and replaced it with
+ * defaults. Reported by the main loop rather than from here: eeprom_init()
+ * runs before serial_debug_init(), which resets the transmit queue, so
+ * anything queued this early is discarded before it reaches the wire.
+ */
+static bool eeprom_reset_on_init = false;
+
 /**
  * @brief Write factory default values to EEPROM (capacity reset).
  */
@@ -30,6 +38,7 @@ void eeprom_write_defaults(void)
    * optimistic seed just means the gauge over-reads until the first full
    * cycle completes.
    */
+  eeprom_data.magic                    = EEPROM_MAGIC;
   eeprom_data.total_pack_capacity      = (PACK_MAX_CAPACITY_MAH       * 1000ul);  //in micro-amp-hours
   eeprom_data.current_charge_level     = ((PACK_MAX_CAPACITY_MAH / 2) * 1000ul);
   eeprom_data.full_discharge_seen      = 0;
@@ -40,7 +49,8 @@ void eeprom_write_defaults(void)
  * @brief Initialize EEPROM emulator, program fuses if needed, verify stored data.
  *
  * If EEPROM fuses are not set, programs them and resets the MCU.
- * On first use or CRC mismatch, writes factory defaults.
+ * On first use, CRC mismatch, or a stored page whose EEPROM_MAGIC does not
+ * match this firmware, writes factory defaults.
  *
  * @return ASF status code from eeprom_emulator_init().
  */
@@ -66,14 +76,17 @@ int eeprom_init(void)
     eeprom_emulator_erase_memory();
     error_code = eeprom_emulator_init();
     eeprom_write_defaults();
+    eeprom_reset_on_init = true;
   }
   else
   {
     //EEPROM emulator OK - read data and verify CRC
     if (eeprom_read() != 0)
     {
-      //CRC mismatch - data corrupted, reinitialize with defaults
+      //Corrupt, or written by firmware with a different EEPROM_MAGIC.
+      //Either way the stored values cannot be trusted - start clean.
       eeprom_write_defaults();
+      eeprom_reset_on_init = true;
     }
   }
 
@@ -81,9 +94,9 @@ int eeprom_init(void)
 }
 
 /**
- * @brief Read EEPROM page and verify CRC32 integrity.
+ * @brief Read EEPROM page, verify CRC32 integrity and the layout marker.
  *
- * @return 0 on success, -1 on CRC mismatch.
+ * @return 0 on success, -1 if the page is corrupt or not ours.
  */
 int eeprom_read(void)
 {
@@ -97,6 +110,16 @@ int eeprom_read(void)
   if (calc != eeprom_data.crc32) {
     eeprom_shadow_valid = false;
     return -1;  //CRC mismatch - data corrupted
+  }
+
+  /*
+   * Intact, but not necessarily ours. Firmware whose layout or field meaning
+   * has changed bumps EEPROM_MAGIC, and its first boot lands here holding a
+   * page that checksums perfectly and means something else.
+   */
+  if (eeprom_data.magic != EEPROM_MAGIC) {
+    eeprom_shadow_valid = false;
+    return -1;
   }
 
   //What we just read is, by definition, what is stored.
@@ -116,6 +139,13 @@ int eeprom_read(void)
  */
 bool eeprom_write(void)
 {
+  /*
+   * Stamped on every write, so no path can store a page carrying a stale
+   * marker. The skip below stays safe: a valid shadow can only have come from
+   * a page that already matched, or from a write that passed through here.
+   */
+  eeprom_data.magic = EEPROM_MAGIC;
+
   /*
    * Skip the write when nothing worth storing has changed.
    *
@@ -171,6 +201,17 @@ bool eeprom_write(void)
   eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
   eeprom_shadow_valid = true;
   return true;   //written
+}
+
+/**
+ * @brief True if eeprom_init() rejected the stored page and wrote defaults.
+ *
+ * Latched for the life of the power cycle, so the main loop can report it once
+ * the debug UART is actually up.
+ */
+bool eeprom_was_reset(void)
+{
+  return eeprom_reset_on_init;
 }
 
 /**
