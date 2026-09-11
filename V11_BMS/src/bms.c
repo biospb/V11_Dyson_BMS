@@ -105,7 +105,8 @@ static int32_t current_filt_mA = 0;
 
 static uint16_t charge_pause_counter = 0;
 static sw_timer bms_timer = 0;
-static int16_t  pack_temperature = 0;
+static int16_t  pack_temperature = 0;      /* TC1 - reported, and the cold check */
+static int16_t  pack_temperature_hot = 0;  /* max(TC1, TC2) - every hot check */
 //volatile: set by the BQ7693 ALERT interrupt, cleared in the main loop.
 static volatile bool process_bms_interrupt = false;
 /*
@@ -161,6 +162,7 @@ static void    pins_init(void);
 static void    pins_deinit(void);
 static void    interrupts_init(void);
 static int16_t bms_read_temperature(void);
+static void    bms_sample_temperatures(void);
 static bool    bms_trigger_active(void);
 static bool    bms_is_safe_to_discharge(void);
 static bool    bms_is_safe_to_charge(void);
@@ -681,9 +683,9 @@ static bool bms_balance_tick(void)
   //Balancing dumps the imbalance as heat inside the pack, unattended, for hours
   //at a time - so it respects the charge temperature ceiling too. Checked here
   //rather than in bq7693_balance_update() because the NTC is not the AFE's.
-  pack_temperature = bms_read_temperature();
+  bms_sample_temperatures();
 
-  if ((pack_temperature / 10) >= CELL_BALANCE_MAX_TEMP)
+  if ((pack_temperature_hot / 10) >= CELL_BALANCE_MAX_TEMP)
   {
     bq7693_disable_balancing();
     bms_balance_status.state     = BQ_BALANCE_TOO_HOT;
@@ -727,7 +729,7 @@ static bool bms_balance_tick(void)
 
       case BQ_BALANCE_TOO_HOT:
         BMS_PRINT("BMS:BAL_HOT t=%dC max=%dC\r\n",
-                  (int)(pack_temperature / 10), (int)CELL_BALANCE_MAX_TEMP);
+                  (int)(pack_temperature_hot / 10), (int)CELL_BALANCE_MAX_TEMP);
         break;
 
       case BQ_BALANCE_TOO_LOW:
@@ -1197,6 +1199,36 @@ static int16_t bms_read_temperature(void)
 }
 
 /**
+ * @brief Sample both pack thermistors into pack_temperature and the hot one.
+ *
+ * The pack carries two, in different places: TC1 (PA07) and TC2 (PA08), the
+ * latter sitting against the cells. They were measured across 24C to 31C and
+ * from 3A to 21A of load, and held a constant 1.3-1.5C apart throughout, so
+ * both are live and both are believable.
+ *
+ * The two are used asymmetrically, on purpose.
+ *
+ * Every HOT check takes the higher of them. That can only make a limit trip
+ * sooner, never later, so the second sensor can add protection and cannot take
+ * any away - and until now a pack getting hot where TC2 sits was simply not
+ * seen at all.
+ *
+ * The COLD check stays on TC1 alone. The thermistor is the lower leg of its
+ * divider, so an open sensor reads as extreme cold, not extreme heat: taking
+ * the lower of the two would let a broken TC2 strand the pack on a permanent
+ * false undertemp, while it cannot fake an overtemp no matter how it fails.
+ */
+static void bms_sample_temperatures(void)
+{
+  int16_t tc2;
+
+  pack_temperature = bms_read_temperature();
+  tc2              = NTC_ADC2Temperature(adc_convert_channel(BMS_ADC_CH_TC2));
+
+  pack_temperature_hot = (tc2 > pack_temperature) ? tc2 : pack_temperature;
+}
+
+/**
  * @brief Check if pack conditions allow discharge.
  * @return true if safe.
  */
@@ -1239,14 +1271,16 @@ static bool bms_is_safe_to_discharge(void)
       BMS_PRINT("BMS:CELL_LOW c=%d v=%dmV\r\n", i, cell_voltages[i]);
     }
   }
-  //Check pack temperature remains in acceptable range
-  pack_temperature = bms_read_temperature();
-  int temp = pack_temperature / 10;
+  //Check pack temperature remains in acceptable range - hot on the hotter of
+  //the two sensors, cold on TC1 alone. See bms_sample_temperatures().
+  bms_sample_temperatures();
+  int temp     = pack_temperature / 10;
+  int temp_hot = pack_temperature_hot / 10;
 
-  if (temp  > MAX_PACK_TEMPERATURE)
+  if (temp_hot > MAX_PACK_TEMPERATURE)
   {
     bms_set_error(BMS_ERR_PACK_OVERTEMP);
-    BMS_PRINT("%s : Pack overtemp %d 'C, max %d\r\n",__FUNCTION__ ,  temp, MAX_PACK_TEMPERATURE);
+    BMS_PRINT("%s : Pack overtemp %d 'C, max %d\r\n",__FUNCTION__ ,  temp_hot, MAX_PACK_TEMPERATURE);
   }
   else if (temp < MIN_PACK_DISCHARGE_TEMP)
   {
@@ -1333,13 +1367,16 @@ static bool bms_is_safe_to_charge(void)
     }
   }
 
-  //Check pack temperature acceptable (<=60'C)
-  pack_temperature = bms_read_temperature();
-  int temp = pack_temperature / 10;
+  //Check pack temperature acceptable (<=60'C) - see bms_sample_temperatures()
+  //for why hot and cold do not use the same reading.
+  bms_sample_temperatures();
+  int temp     = pack_temperature / 10;
+  int temp_hot = pack_temperature_hot / 10;
 
-  if (temp >= MAX_PACK_CHARGE_TEMP || temp >= MAX_PACK_TEMPERATURE)
+  if (temp_hot >= MAX_PACK_CHARGE_TEMP || temp_hot >= MAX_PACK_TEMPERATURE)
   {
     bms_set_error(BMS_ERR_PACK_OVERTEMP);
+    BMS_PRINT("%s: Pack overtemp %d 'C, max %d\r\n", __FUNCTION__, temp_hot, MAX_PACK_CHARGE_TEMP);
   }
   else if (temp < MIN_PACK_CHARGE_TEMP)
   {
