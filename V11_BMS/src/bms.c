@@ -436,6 +436,25 @@ static bool bms_charge_fet_on(void)
     return false;
   }
 
+#ifdef SERIAL_DEBUG
+  /*
+   * bq7693_enable_charge() reports whether the WRITE was accepted, not whether
+   * the FET came on: the AFE can ACK the transfer and leave CHG_ON clear, and
+   * it drops the bit itself for a latched fault. Read both registers back so
+   * the log says which of the two happened. Expect CTRL2=0x41 (CC_EN|CHG_ON)
+   * and STAT=0x00.
+   */
+  {
+    uint8_t ctrl2 = 0u;
+    uint8_t stat  = 0u;
+
+    (void)bq7693_read_register(SYS_CTRL2, 1, &ctrl2);
+    (void)bq7693_read_register(SYS_STAT,  1, &stat);
+    BMS_PRINT("BMS:CHG_FET readback CTRL2=0x%02X STAT=0x%02X\r\n",
+              (unsigned)ctrl2, (unsigned)stat);
+  }
+#endif
+
   return true;
 }
 
@@ -2001,6 +2020,12 @@ static void bms_handle_charging(void)
   bool    trigger_was_pressed = false;
   sw_timer trigger_timeout_timer = 0;
 
+  // Charge-current supervision - drives the indication only, see below.
+  sw_timer charge_flow_timer      = 0;
+  sw_timer noflow_led_timer       = 0;
+  bool     noflow_led_on          = false;
+  bool     current_flowing_prev   = true;
+
   //Sanity check...
   if (!bms_is_safe_to_charge())
   {
@@ -2035,23 +2060,83 @@ static void bms_handle_charging(void)
     return;
   }
 
+  bms_debug_dump_temps("chg_on");
+
+  sw_timer_start(&charge_flow_timer);
+
   charge_pause_counter = 0;
 
   while (1)
   {
      #define DUTY_MAX    100
-     uint8_t duty_loc = charging_leds_duty;
 
-     if(charging_leds_duty > DUTY_MAX)
+     /*
+      * Does the current match the command? The FET is enabled and every safety
+      * check passes, but neither of those says a single milliamp is moving. A
+      * dead charger, dirty dock contacts, a charge path wired to a pin this
+      * firmware does not drive, or an AFE that accepts the CHG_ON write while
+      * the FET never conducts all look identical from in here. Show that
+      * difference rather than breathing a charge that is not happening.
+      *
+      * Believed only after CHARGE_CURRENT_GRACE_MS - the current filter has a
+      * 500ms time constant and a charger takes a moment to come up - and the
+      * grace is re-armed every time the FET is enabled, including after a
+      * full-charge pause.
+      *
+      * NB indication only. Nothing here faults the pack or stops the retrying:
+      * a charger that starts late must still be allowed to start.
+      */
+     bool current_flowing = true;
+
+     if (sw_timer_is_elapsed(&charge_flow_timer, CHARGE_CURRENT_GRACE_MS))
      {
-       duty_loc = ((DUTY_MAX * 2) - charging_leds_duty);
+       int32_t current_abs_mA = (current_filt_mA < 0) ? -current_filt_mA : current_filt_mA;
+       current_flowing = (current_abs_mA >= CHARGE_CURRENT_MIN_MA);
      }
 
-     (duty_loc < 10) ? duty_loc = 0 : (duty_loc);
+     if (current_flowing != current_flowing_prev)
+     {
+       BMS_PRINT("BMS:CHARGING current %s\r\n", current_flowing ? "flowing" : "ABSENT");
+       /* The interesting moment: charge is commanded, so every output on the
+          charge path should be asserted. Whatever is not, is the lead. */
+       bms_debug_dump_pins(current_flowing ? "chg_ok" : "chg_absent");
+       bms_debug_dump_temps(current_flowing ? "chg_ok" : "chg_absent");
+       current_flowing_prev = current_flowing;
+     }
 
-     leds_set_led_duty(LEDS_LED_ERR_RIGHT, duty_loc);
-     leds_set_led_duty(LEDS_LED_ERR_LEFT,  duty_loc);
-     charging_leds_duty = (charging_leds_duty + ((charging_leds_duty > 20) ? 10 : 1)) % ((DUTY_MAX * 2) + 1);
+     if (current_flowing)
+     {
+       uint8_t duty_loc = charging_leds_duty;
+
+       if(charging_leds_duty > DUTY_MAX)
+       {
+         duty_loc = ((DUTY_MAX * 2) - charging_leds_duty);
+       }
+
+       (duty_loc < 10) ? duty_loc = 0 : (duty_loc);
+
+       leds_set_led_duty(LEDS_LED_ERR_RIGHT, duty_loc);
+       leds_set_led_duty(LEDS_LED_ERR_LEFT,  duty_loc);
+       charging_leds_duty = (charging_leds_duty + ((charging_leds_duty > 20) ? 10 : 1)) % ((DUTY_MAX * 2) + 1);
+     }
+     else
+     {
+       /*
+        * Commanded, but nothing is flowing. One LED, hard on/off, so it cannot
+        * be read as the smooth two-LED breathe. Driven from a timer rather
+        * than leds_blink_*(), which spin inside sw_timer_delay_ms() and would
+        * stall every check below for the length of the blink.
+        */
+       charging_leds_duty = 0;
+       leds_set_led_duty(LEDS_LED_ERR_RIGHT, 0);
+
+       if (sw_timer_is_elapsed(&noflow_led_timer, CHARGE_NO_CURRENT_LED_MS))
+       {
+         sw_timer_start(&noflow_led_timer);
+         noflow_led_on = !noflow_led_on;
+         leds_set_led_duty(LEDS_LED_ERR_LEFT, noflow_led_on ? 100 : 0);
+       }
+     }
 
     // Detect trigger pushes for eeprom reset (20 pushes = reset)
     {
@@ -2207,6 +2292,9 @@ static void bms_handle_charging(void)
       {
         //Restart charging
         port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
+        //The pause left the current at zero by design - do not let the
+        //supervision above read that as a dead charger.
+        sw_timer_start(&charge_flow_timer);
         if (!bms_charge_fet_on())
         {
           port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
@@ -2221,9 +2309,21 @@ static void bms_handle_charging(void)
     else
     {
 #ifdef SERIAL_DEBUG
-      if(++debug_print_cnt > 5)
+      /*
+       * Slower when nothing is flowing, and carrying the cell voltages: the
+       * current is known to be zero and says nothing more, whereas whether the
+       * cells hold steady while charge is commanded is exactly the question.
+       * 20 passes of the 50ms loop is about a second, against ~300ms when
+       * there is a real charge to follow.
+       */
+      if(++debug_print_cnt > (current_flowing ? 5u : 20u))
       {
         BMS_PRINT("BMS:CHARGING I:%d mA @ %ld mAH, C:%ld mAH, T:%d 'C, P:%d mV\r\n", abs(current_filt_mA), (eeprom_data.current_charge_level / 1000), (eeprom_data.total_pack_capacity / 1000), (int16_t)(pack_temperature / 10), bq7693_get_pack_voltage());
+        if (!current_flowing)
+        {
+          serial_debug_send_cell_voltages();
+          bms_debug_dump_temps("chg");
+        }
         debug_print_cnt = 0;
       }
 #endif

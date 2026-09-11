@@ -115,6 +115,23 @@
 #define FAULT_BLINK_GAP_MS                  350   // between pulses
 #define FAULT_BLINK_REPEAT_MS               2500  // before the pattern repeats
 
+// Charge-current supervision, used only to drive the indication - it never
+// faults the pack, because a charger that is simply slow to come up is not an
+// error and the state machine keeps retrying regardless.
+//
+// The LSB of the coulomb counter is BQ7693_CC_LSB_MA (8.44mA) and the filtered
+// reading dithers by about one LSB with nothing flowing, so the floor has to
+// sit well clear of that. A V11 charges at roughly 1A, so this is deliberately
+// low: the question being answered is "anything at all?", not "as much as
+// expected?".
+#define CHARGE_CURRENT_MIN_MA               50
+// Grace period after the charge FET is enabled before the current is believed.
+// Covers the 500ms time constant of the current filter plus however long the
+// charger takes to start delivering. Re-armed on every enable.
+#define CHARGE_CURRENT_GRACE_MS             3000
+// Half-period of the "commanded but not flowing" blink.
+#define CHARGE_NO_CURRENT_LED_MS            500
+
 // Once a cell reaches max charge volts, stop charging, let the pack settle,
 // then retry - this many times before declaring the pack full. The pause is
 // also when the balancer gets to work on the charge path, and it only starts
