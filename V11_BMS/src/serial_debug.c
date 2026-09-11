@@ -23,7 +23,13 @@
 /*-----------------------------------------------------------------------------
     DECLARATION OF LOCAL MACROS/#DEFINES
 -----------------------------------------------------------------------------*/
-#define DEBUG_QUEUE_SIZE  256
+/* 512, not 256. BMS_INIT queues the banner, both PINS lines, the PA25 probe,
+   V:, VCALL:, both thermistors and the capacity back to back, and the state
+   machine can reach BMS_CHARGING before any of it has drained - at 256 the
+   CHG_FET readback line was arriving cut in half. The queue drains one byte
+   per serial_debug_process(), which runs in SW_TIMER_SERVICES() as fast as the
+   delay loop spins, so the depth only has to cover the burst. */
+#define DEBUG_QUEUE_SIZE  512
 
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL TYPES
@@ -160,6 +166,37 @@ void serial_debug_send_cell_voltages(void)
 
   DEBUG_SNPRINTF(tmp, sizeof(tmp), "P: %d\r\n", bq7693_get_pack_voltage());
   serial_debug_send_message(tmp);
+#endif
+}
+
+/**
+ * @brief Queue all ten raw VC channels, whether or not the cell map uses them.
+ *
+ * Output format: "VCALL: <VC1> <VC2> ... <VC10>\r\n"
+ *
+ * Read it against cellsToRead[] in bq7693_get_cell_voltages(): the channels
+ * that map to cells are 1,2,3,4,6,7,10 (one-based, so entries 0,1,2,3,5,6,9
+ * here). Entries 4, 7 and 8 - VC5, VC8, VC9 - are the shorted ones and should
+ * sit near zero. Anything else means this board is not wired the way the map
+ * assumes.
+ */
+void serial_debug_send_all_vc(void)
+{
+#if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
+  char tmp[16];
+  uint16_t vc[10];
+
+  bq7693_get_all_vc(vc);
+
+  serial_debug_send_message("VCALL:");
+
+  for (int i = 0; i < 10; ++i)
+  {
+    DEBUG_SNPRINTF(tmp, sizeof(tmp), " %d", vc[i]);
+    serial_debug_send_message(tmp);
+  }
+
+  serial_debug_send_message("\r\n");
 #endif
 }
 

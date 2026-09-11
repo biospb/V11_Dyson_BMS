@@ -182,6 +182,8 @@ static uint8_t bms_sys_stat_take(void);
 static bool    bms_charge_fet_on(void);
 static bool    bms_discharge_fet_on(void);
 static void    bms_enter_standby(void);
+static void    bms_debug_dump_pins(const char *who);
+static void    bms_debug_dump_temps(const char *who);
 static void    bms_leave_standby(void);
 static void    rtc_standby_timer_init(void);
 static void    rtc_standby_timer_start(void);
@@ -269,11 +271,35 @@ void bms_interrupt_process(void)
   /* Latch and clear every fault bit. Clearing is what allows ALERT to fall
      and the next edge to be seen; the bits are handed to the safety checks
      through bms_sys_stat_take() so nothing is lost by clearing them here. */
+#ifdef SERIAL_DEBUG
+  /*
+   * Report the fault bits only when the set of them changes. A latched
+   * condition re-arms this every poll, and at SYS_STAT_POLL_MS that flood
+   * buried everything else in the log. Nothing is lost: each safety check
+   * still prints its own "SYS_STAT faults=" line with the value it acted on,
+   * and clearing back to zero is tracked here too, so a condition that goes
+   * away and returns is reported again.
+   */
+  {
+    static uint8_t last_reported = 0u;
+    uint8_t flags = (uint8_t)(sys_stat & STAT_FLAGS);
+
+    if (flags != last_reported)
+    {
+      last_reported = flags;
+
+      if (flags != 0u)
+      {
+        BMS_PRINT("BMS:SYS_STAT=0x%02X\r\n", sys_stat);
+      }
+    }
+  }
+#endif
+
   if (sys_stat & STAT_FLAGS)
   {
     bms_sys_stat_faults |= (uint8_t)(sys_stat & STAT_FLAGS);
     bq7693_write_register(SYS_STAT, (uint8_t)(sys_stat & STAT_FLAGS));
-    BMS_PRINT("BMS:SYS_STAT=0x%02X\r\n", sys_stat);
   }
 
   if (sys_stat & STAT_CC_READY)
@@ -514,6 +540,13 @@ void bms_mainloop(void)
 #if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
         //Initial debug blurb
         serial_debug_send_message("Dyson V11/V15 BMS After market firmware\r\n");
+        /* eeprom_init() runs before serial_debug_init(), which clears the
+           queue, so it cannot report this itself - see eeprom_was_reset(). */
+        if (eeprom_was_reset())
+        {
+          serial_debug_send_message("BMS:EEPROM_RESET_TO_DEFAULTS\r\n");
+        }
+        bms_debug_dump_pins("boot");
 #endif
         leds_sequence();
         wdt_reset_count();
@@ -521,6 +554,10 @@ void bms_mainloop(void)
 #if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
         //Initial debug blurb
         serial_debug_send_cell_voltages();
+        //All ten channels, not just the seven the cell map claims - see there.
+        serial_debug_send_all_vc();
+        bms_adc_debug_sweep();
+        bms_debug_dump_temps("boot");
         serial_debug_send_pack_capacity();
 #endif
         wdt_reset_count();
@@ -913,7 +950,12 @@ static void pins_init(void)
 
   struct port_config charge_pin_config;
   port_get_config_defaults(&charge_pin_config);
-  charge_pin_config.direction = PORT_PIN_DIR_OUTPUT;
+  /* WTH_READBACK leaves the input buffer enabled, so PORT.IN reports what the
+     pin is actually AT rather than what we are driving it to. That difference
+     is the whole point of bms_debug_dump_pins(): a pin driven high that reads
+     back low is being held down by something external. Costs a little leakage
+     and nothing else. */
+  charge_pin_config.direction = PORT_PIN_DIR_OUTPUT_WTH_READBACK;
   port_pin_set_config(ENABLE_CHARGE_PIN, &charge_pin_config);
   port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
 
@@ -928,7 +970,7 @@ static void pins_init(void)
 
   struct port_config io_pin_config;
   port_get_config_defaults(&io_pin_config);
-  io_pin_config.direction = PORT_PIN_DIR_OUTPUT;
+  io_pin_config.direction = PORT_PIN_DIR_OUTPUT_WTH_READBACK;   //see above
 
   // pack voltage feedback
   port_pin_set_config(PIN_PA03, &io_pin_config);
@@ -942,9 +984,19 @@ static void pins_init(void)
   port_pin_set_config(PRECHARGE_PIN, &io_pin_config);
   port_pin_set_output_level(PRECHARGE_PIN, false);
 
-  // unknown functionality pin
-  //port_pin_set_config(PIN_PA25, &io_pin_config);
-  //port_pin_set_output_level(PIN_PA25, true);
+  // unknown functionality pin - see UNKNOWN_PA25_DRIVE_HIGH
+#if UNKNOWN_PA25_DRIVE_HIGH
+  port_pin_set_config(PIN_PA25, &io_pin_config);
+  port_pin_set_output_level(PIN_PA25, true);
+#else
+  /* Left as an input, but configured as one: a pin that has never been through
+     port_pin_set_config() has its input buffer off and reads 0 in PORT.IN no
+     matter what it is sitting at, so bms_debug_dump_pins() reported PA25 low
+     unconditionally. It in fact sits high in every state, through a high
+     impedance, and does not follow ENABLE_CHARGE_PIN - so whatever it carries,
+     it is not the charge-path control this pin was suspected of being. */
+  port_pin_set_config(PIN_PA25, &sense_pin_config);
+#endif
 
   // mode button
   port_pin_set_config(MODE_BUTTON_PIN, &sense_pin_config);
@@ -953,9 +1005,86 @@ static void pins_init(void)
 /** @brief De-initialize GPIO outputs before entering sleep. */
 static void pins_deinit(void)
 {
+#if UNKNOWN_PA25_DRIVE_HIGH
+  port_pin_set_output_level(PIN_PA25, false);
+#endif
   port_pin_set_output_level(PIN_PA03, false);
   port_pin_set_output_level(MODE_BUTTON_PULLUP_ENABLE_PIN, false);
   port_pin_set_output_level(PRECHARGE_PIN, false);
+}
+
+/**
+ * @brief Report both thermistors, plus the raw charge-path feedback.
+ *
+ * Only TC1 (PA07) feeds the over/under-temperature interlocks. TC2 (PA08) sits
+ * against the cells and is read for comparison only - until the two have been
+ * watched across a real temperature range there is no basis for letting it
+ * gate anything.
+ *
+ * Temperatures print in 0.1C rather than whole degrees: the question being
+ * answered is whether the two agree, and a one-degree print cannot show a
+ * half-degree disagreement.
+ *
+ * CHG_FB prints as a raw conversion, deliberately - running it through the NTC
+ * curve produced a number that looked like a room temperature and was not one.
+ *
+ * @param who  Short tag identifying the call site.
+ */
+static void bms_debug_dump_temps(const char *who)
+{
+#ifdef SERIAL_DEBUG
+  int16_t t1 = NTC_ADC2Temperature(adc_convert_channel(BMS_ADC_CH_TC1));
+  int16_t t2 = NTC_ADC2Temperature(adc_convert_channel(BMS_ADC_CH_TC2));
+  uint16_t fb = adc_convert_channel(BMS_ADC_CH_CHG_FB);
+
+  BMS_PRINT("TEMP(%s) 0.1C PA07=%d PA08=%d  CHG_FB=%u\r\n", who, t1, t2, fb);
+#else
+  (void)who;
+#endif
+}
+
+/**
+ * @brief Dump the state of every PORT A pin to the debug UART.
+ *
+ * Two lines. The first carries everything: DIR says which pins are outputs,
+ * OUT what we are driving them to, IN what they are actually sitting at. An
+ * output whose OUT and IN bits disagree is being fought by something external
+ * - that is the case this exists to catch.
+ *
+ * The second decodes the handful that matter for the charge path, so the
+ * common case needs no bit counting.
+ *
+ * Deliberately short: the debug queue is DEBUG_QUEUE_SIZE (256) bytes and
+ * drains one byte per call, so a per-pin listing would overflow it and lose
+ * its own tail.
+ *
+ * @param who  Short tag identifying the call site.
+ */
+static void bms_debug_dump_pins(const char *who)
+{
+#ifdef SERIAL_DEBUG
+  const uint32_t dir = PORT->Group[0].DIR.reg;
+  const uint32_t out = PORT->Group[0].OUT.reg;
+  const uint32_t in  = PORT->Group[0].IN.reg;
+
+  #define PIN_DRV(p)  ((unsigned)((out >> (p)) & 1ul))
+  #define PIN_LVL(p)  ((unsigned)((in  >> (p)) & 1ul))
+
+  BMS_PRINT("PINS(%s) DIR=%08lX OUT=%08lX IN=%08lX\r\n", who,
+            (unsigned long)dir, (unsigned long)out, (unsigned long)in);
+  BMS_PRINT("PINS CHG_EN=%u/%u CHARGER=%u TRIG=%u PRECHG=%u PA25=%u/%u ALERT=%u\r\n",
+            PIN_DRV(1), PIN_LVL(1),      /* PA01 ENABLE_CHARGE - drive/actual */
+            PIN_LVL(6),                  /* PA06 CHARGER_CONNECTED */
+            PIN_LVL(4),                  /* PA04 TRIGGER_PRESSED */
+            PIN_LVL(24),                 /* PA24 PRECHARGE */
+            PIN_DRV(25), PIN_LVL(25),    /* PA25 unknown */
+            PIN_LVL(28));                /* PA28 BQ7693 ALERT */
+
+  #undef PIN_DRV
+  #undef PIN_LVL
+#else
+  (void)who;
+#endif
 }
 
 /** @brief Configure EIC for BQ7693 ALERT, mode button, trigger, and charger pins. */
@@ -1338,7 +1467,7 @@ static void bms_handle_idle(void)
     if(true == vacuum_connected)
       sleep_time = (IDLE_TIME * 1000ul);
     else
-      sleep_time = (20 * 1000ul); // 20 sec
+      sleep_time = (IDLE_NO_VACUUM_TIME * 1000ul);
 
     if (bms_fault_pending())
     {
@@ -1496,6 +1625,9 @@ static void bms_handle_vacuum_running(void)
     if(++debug_print_cnt > 5)
     {
       BMS_PRINT("BMS:VACUUM_RUNNING I:%d mA @ %ld mAH, C:%ld mAH, T:%d 'C, P:%d mV\r\n", abs(current_filt_mA), (eeprom_data.current_charge_level / 1000), (eeprom_data.total_pack_capacity / 1000), (int16_t)(pack_temperature / 10), bq7693_get_pack_voltage());
+      /* The motor is the only heat source available on a bench - this is how
+         the three sensors get compared across a real temperature range. */
+      bms_debug_dump_temps("vac");
       debug_print_cnt = 0;
     }
 #endif
@@ -1521,6 +1653,14 @@ static void bms_handle_fault(void)
   sw_timer fault_timer = 0;
 
   BMS_PRINT("BMS:FAULT err=%d auto_recover=%d\r\n", original_error, auto_recover);
+#ifdef SERIAL_DEBUG
+  /* What the pack looked like at the moment it faulted. The safety check names
+     only the cell it tripped on. VCALL and the BQ7693 thermistors used to be
+     dumped here too - both questions are settled (the cell map is correct,
+     TS1/TS2 have nothing connected), so they are boot-only now. */
+  serial_debug_send_cell_voltages();
+  bms_debug_dump_temps("fault");
+#endif
 
   sw_timer_start(&fault_timer);
 
@@ -1601,6 +1741,13 @@ static void bms_handle_fault(void)
       if (retry_due)
       {
         sw_timer_start(&retry_timer);
+#ifdef SERIAL_DEBUG
+        /* Repeated every FAULT_RETRY_MS: an intermittent sense connection is
+           only visible as movement between samples, so one snapshot at entry
+           is not enough to tell it from a genuinely flat cell. */
+        serial_debug_send_cell_voltages();
+        bms_debug_dump_temps("fault");
+#endif
 
         if (bms_is_safe_to_charge())
         {
@@ -1662,6 +1809,8 @@ static void bms_handle_fault(void)
 /** @brief Charger connected: evaluate pack and begin charging or report full. */
 static void bms_handle_charger_connected(void)
 {
+  bms_debug_dump_temps("chg_in");
+
   if (bms_is_pack_full())
   {
     bms_state = BMS_CHARGER_CONNECTED_NOT_CHARGING;
@@ -1859,12 +2008,23 @@ static void bms_handle_charging(void)
     return;
   }
 
+  /*
+   * Entering this state changes three things at once - DSG off, the external
+   * charge-enable pin high, CHG_ON in the AFE - and an analogue reading that
+   * moves "on entry to charging" says nothing about which of them did it.
+   * Sampling between each step attributes the change to one action.
+   */
+  bms_debug_dump_temps("pre");
+
   // Disable the discharge FET while charging; precharge pin stays asserted
   // by dsn_protocol so the vacuum keeps logic power.
   bq7693_disable_discharge();
+  bms_debug_dump_temps("dsg_off");
 
   //Enable charging.
   port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
+  bms_debug_dump_temps("pa01_hi");
+
   //Enable the charge FET in the BQ7693.
   if (!bms_charge_fet_on())
   {
@@ -2130,6 +2290,7 @@ static void bms_handle_charging(void)
 static void bms_handle_charger_unplugged(void)
 {
   bms_balance_stop();
+  bms_debug_dump_temps("chg_out");
 
   //Do a little flash to show how out of sync the pack is, then go to idle.
   uint16_t *cell_voltages = bq7693_get_cell_voltages();

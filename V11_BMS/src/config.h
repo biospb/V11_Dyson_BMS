@@ -29,6 +29,29 @@
 #define MODE_BUTTON_PULLUP_ENABLE_PIN       PIN_PA18
 #define PRECHARGE_PIN                       PIN_PA24
 
+// PA25 has no known function. The original firmware drove it high, and the
+// port left that commented out in pins_init() - so on a board whose charge
+// path needs it, charging is commanded, the AFE reports CHG_ON set and no
+// fault, and still not a milliamp moves.
+//
+// Set to 1 to drive it high and find out. Off by default because it is a
+// guess: if something external drives PA25 low, turning it into a high output
+// puts the two in contention. Measure the pin first if you can - a pin that
+// already sits at a defined level is being driven by something, and driving it
+// from here is then not a free experiment.
+#define UNKNOWN_PA25_DRIVE_HIGH             0
+
+// Point the BQ7693 TS1/TS2 inputs at the external thermistors (TEMP_SEL=1)
+// instead of the die temperature sensor.
+//
+// Off, because it was tried and answered: on this board both TS pins sit at
+// the pull-up rail - hundreds of kilohms, i.e. open - so there are no
+// thermistors on the AFE at all. The pack's sensors are on MCU ADC pins (PA07
+// and PA08); see bms_adc_ch_t. With this at 0 the AFE reports its own die
+// temperature, which is at least a real measurement, and nothing in the
+// firmware reads either way.
+#define BQ_EXT_THERMISTOR_ENABLE            0
+
 // Nominal cell capacity, in mAh. The pack is 7S1P so this is the capacity of a
 // single cell, not the sum. Set it to what is actually fitted: it bounds what
 // the coulomb counter is allowed to learn, seeds the defaults, clamps the
@@ -58,6 +81,17 @@
 // Do not charge battery when hot and not supervised! This is for Debug only for V15, battery pack outputs 24V
 
 #define IDLE_TIME                           60 * 30 // Idle time in seconds. Pack will go into SHIP/deep sleep mode if nothing happens in this duration
+// Idle timeout when no cleaner is talking to us - a pack sitting on the bench,
+// or one just taken off the dock. Much shorter than IDLE_TIME because there is
+// nothing to wait for.
+//
+// Worth knowing while working on a pack: when this expires the BQ7693 goes to
+// SHIP, REGOUT drops and the MCU loses power, and the ONLY way back is the
+// BOOT pin - the I2C bus is dead along with the regulator, so no amount of
+// reflashing or attaching a debugger will reach it. On a board whose wake path
+// is damaged that is indistinguishable from a dead pack. Raise this (or set it
+// to IDLE_TIME) to keep a pack awake on the bench.
+#define IDLE_NO_VACUUM_TIME                 20      // seconds
 
 // How long BMS_FAULT keeps blinking its error code before giving up and going
 // to SHIP mode. Without this the fault state loops forever - which for

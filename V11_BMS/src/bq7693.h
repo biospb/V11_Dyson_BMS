@@ -86,6 +86,7 @@ void bq7693_comm_clear_error(void);
 bool bq7693_comm_healthy(void);
 
 uint16_t* bq7693_get_cell_voltages(void);
+extern void bq7693_get_all_vc(uint16_t *voltages_out);  /* 10 entries, VC1..VC10 */
 int bq7693_get_pack_voltage(void);
 /* Return false if the FET could not be driven - see bq7693_enable_charge(). */
 bool bq7693_enable_charge(void);
@@ -180,6 +181,18 @@ void bq7693_balance_update(bq7693_balance_status_t *status);
 
 #define BAT_HI_BYTE     0x2A
 #define BAT_LO_BYTE     0x2B
+
+/* SYS_CTRL1 bits. TEMP_SEL picks the external thermistors on TS1/TS2 over the
+   internal die sensor; ADC_EN has to stay set alongside it, which is why both
+   writers use the composite below rather than a bare literal. */
+#define SYS_CTRL1_ADC_EN    0x10
+#define SYS_CTRL1_TEMP_SEL  0x08
+
+#if BQ_EXT_THERMISTOR_ENABLE
+#define SYS_CTRL1_RUN     (SYS_CTRL1_ADC_EN | SYS_CTRL1_TEMP_SEL)
+#else
+#define SYS_CTRL1_RUN     (SYS_CTRL1_ADC_EN)
+#endif
 
 #define TS1_HI_BYTE     0x2C
 #define TS1_LO_BYTE     0x2D

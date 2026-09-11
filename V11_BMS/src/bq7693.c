@@ -121,7 +121,7 @@ void bq7693_init()
   bq7693_write_register(CC_CFG, 0x19); //'magic' value as per datasheet.
   bq7693_write_register(SYS_CTRL2, 0x40); //CC_EN - enable continuous operation of coulomb counter
 
-  bq7693_write_register(SYS_CTRL1, 0x10); //ADC_EN
+  bq7693_write_register(SYS_CTRL1, SYS_CTRL1_RUN); //ADC_EN, plus TEMP_SEL if enabled
 
   //Explicitly clear any set bits in the SYS_STAT register by writing them
   //back - but only bits we actually read. Writing an unread byte back would
@@ -448,7 +448,7 @@ void bq7693_disable_charge(void)
  */
 bool bq7693_enable_discharge(void)
 {
-  bq7693_write_register(SYS_CTRL1, 0x10);  //ADC_EN=1
+  bq7693_write_register(SYS_CTRL1, SYS_CTRL1_RUN);  //ADC_EN=1, plus TEMP_SEL if enabled
 
   bq7693_write_register(PROTECT1, 0x9F);
   bq7693_write_register(PROTECT2, 0x04);
@@ -523,6 +523,39 @@ uint16_t *bq7693_get_cell_voltages(void)
   }
 
   return bq7693_cell_voltages;
+}
+
+/**
+ * @brief Read every VC channel, ignoring the cell-to-channel map. Diagnostic.
+ *
+ * bq7693_get_cell_voltages() returns only the seven channels this pack is
+ * believed to use - cellsToRead[] = {0,1,2,3,5,6,9}, i.e. VC1..VC4, VC6, VC7,
+ * VC10 - and that map is reverse-engineered from one board. This returns all
+ * ten, so a board wired differently gives itself away: a real cell voltage on
+ * a channel the map skips (VC5, VC8, VC9), or nothing on one it uses.
+ *
+ * On a correctly-mapped 7S pack the three skipped channels read near zero,
+ * because unused inputs are shorted.
+ *
+ * @param voltages_out  Array of 10, filled with VC1..VC10 in mV. A channel
+ *                      whose read failed is reported as 0, and the comm error
+ *                      is left latched for the caller to notice.
+ */
+void bq7693_get_all_vc(uint16_t *voltages_out)
+{
+  uint8_t scratch[2];
+  uint16_t tempval;
+
+  for (int i = 0; i < 10; ++i)
+  {
+    if (!bq7693_read_register((uint8_t)(VC1_HI_BYTE + (2 * i)), 2, scratch))
+    {
+      voltages_out[i] = 0;
+      continue;
+    }
+    tempval = ((scratch[0] & 0x3F) << 8) | scratch[1];
+    voltages_out[i] = tempval * bq7693_adc_gain / 1000 + bq7693_adc_offset;
+  }
 }
 
 /**

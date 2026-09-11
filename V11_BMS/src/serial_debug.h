@@ -48,6 +48,7 @@ extern void serial_debug_init(void);
 extern void serial_debug_send_message(const char *msg);
 extern void serial_debug_process(void);
 extern void serial_debug_send_cell_voltages(void);
+extern void serial_debug_send_all_vc(void);
 extern void serial_debug_send_pack_capacity(void);
 
 /*-----------------------------------------------------------------------------
