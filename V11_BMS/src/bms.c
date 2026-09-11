@@ -1540,6 +1540,9 @@ static void bms_handle_sleep(void)
   bq7693_disable_discharge();
 
   leds_sequence();
+  /* Not leds_off(): the pins have to come off the TC and be held low as GPIO
+     before REGOUT goes, or they are released mid-PWM and glow. See there. */
+  leds_deinit();
 
   pins_deinit();
 

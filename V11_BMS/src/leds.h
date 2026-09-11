@@ -40,6 +40,7 @@ typedef enum
   DECLARATION OF GLOBAL FUNCTIONS
 -----------------------------------------------------------------------------*/
 extern void leds_init(void);
+extern void leds_deinit(void);
 extern void leds_sequence(void) ;
 extern void leds_blink_leds(uint32_t);
 extern void leds_blink_led(leds_t led, uint32_t ms);

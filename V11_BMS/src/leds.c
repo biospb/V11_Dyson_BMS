@@ -94,6 +94,43 @@ static const leds_cfg_t leds_cfg[] =
 }
 
 /**
+ * @brief Park the LED outputs for a power-down.
+ *
+ * leds_off() only writes a zero duty. That is genuinely off while the firmware
+ * is running, but it leaves both TC modules counting and both pins under
+ * peripheral control - and SHIP mode then removes REGOUT underneath all of it.
+ * The supply decays, the core browns out somewhere unpredictable, and the pins
+ * are released in whatever state the timers happened to leave them. The
+ * symptom is both LEDs sitting faintly lit after the pack has gone to sleep.
+ *
+ * So take the pins back from the TC and drive them low as plain GPIO, then
+ * stop the timers. port_pin_set_config() selects SYSTEM_PINMUX_GPIO, which is
+ * what actually detaches the pin from the peripheral; the level write then
+ * holds it low for as long as the MCU still has a supply.
+ *
+ * That last clause is the limit of what firmware can do here. A pin whose VDD
+ * has gone is high impedance no matter what was written to it, so a glow that
+ * survives this one is the LED driver's own leakage on the way down, and
+ * belongs to the hardware rather than to this function.
+ */
+void leds_deinit(void)
+{
+  struct port_config pin_conf;
+
+  port_get_config_defaults(&pin_conf);
+  pin_conf.direction = PORT_PIN_DIR_OUTPUT;
+
+  for(uint8_t i = 0; i < (uint8_t)LEDS_NUM; i++)
+  {
+    tc_set_compare_value(&tc_instances[i], leds_cfg[i].chnl, 0);
+    tc_disable(&tc_instances[i]);
+
+    port_pin_set_config((uint8_t)leds_cfg[i].pin_out, &pin_conf);
+    port_pin_set_output_level((uint8_t)leds_cfg[i].pin_out, false);
+  }
+}
+
+/**
  * @brief Play a smooth fade-in / fade-out LED sequence.
  *
  * Both LEDs ramp up then down over 400 steps with 1 ms spacing.
