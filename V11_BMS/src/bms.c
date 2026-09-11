@@ -1552,6 +1552,14 @@ static void bms_handle_idle(void)
   bool debug_grace_used     = false;
   sw_timer dsg_retry_timer  = 0;    // never started, so the first pass is immediate
 
+  /*
+   * Outer loop so the idle period can be granted a second time. The check has
+   * to live out here: inside the body it could never fire, because the 50ms
+   * delay at the bottom is where the timeout almost always expires, and the
+   * while() condition below sees that before the next pass of the body does.
+   */
+  for (;;)
+  {
   sw_timer_start(&bms_timer);
 
   do
@@ -1642,35 +1650,28 @@ static void bms_handle_idle(void)
 
     trigger_was_pressed = trigger_pressed;
 
-    /*
-     * One extra idle period before sleeping, once, if a debugger has been seen
-     * since power-up.
-     *
-     * Not a refusal - gating sleep on DBGPRES stopped a pack from ever
-     * sleeping again after a single flash, because the bit latches until the
-     * part loses power and a programmer's reset does not clear it. A grace
-     * period costs nothing and does not lie: if the adapter really is gone the
-     * pack sleeps 20 seconds later than it would have, and if it is still
-     * plugged in there is now a line in the log saying so with time to act.
-     *
-     * sw_timer_is_elapsed() stops the timer when it fires, and a stopped timer
-     * keeps reading as elapsed - so restarting it here is what actually grants
-     * the extra period, and the loop condition below sees a running timer
-     * again.
-     */
-    if (   !debug_grace_used
-        && DSU->STATUSB.bit.DBGPRES
-        && sw_timer_is_elapsed(&bms_timer, sleep_time))
-    {
-      debug_grace_used = true;
-      serial_debug_send_message("BMS:DEBUGGER_SEEN - unplug the programmer, sleeping after one more idle period\r\n");
-      sw_timer_start(&bms_timer);
-    }
-
     sw_timer_delay_ms(50);
     wdt_reset_count();
 
   } while (false == sw_timer_is_elapsed(&bms_timer, sleep_time));
+
+  /*
+   * One extra idle period before sleeping, once, if a debugger has been seen
+   * since power-up.
+   *
+   * Not a refusal: gating sleep on DBGPRES stopped a pack from ever sleeping
+   * again after a single flash, because the bit outlives the programmer's
+   * reset. A grace period costs one idle period if the adapter really is gone,
+   * and buys a warning with time to act on it if it is not.
+   */
+  if (debug_grace_used || (DSU->STATUSB.bit.DBGPRES == 0u))
+  {
+    break;
+  }
+
+  debug_grace_used = true;
+  serial_debug_send_message("BMS:DEBUGGER_SEEN - unplug the programmer, sleeping after one more idle period\r\n");
+  }
 
   //Reached the end of our wait loop, with nobody pulling the trigger, or plugging in charger.
   //Transit to sleep state
