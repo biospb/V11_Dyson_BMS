@@ -1028,23 +1028,8 @@ static void pins_deinit(void)
   port_pin_set_output_level(PIN_PA25, false);
 #endif
   port_pin_set_output_level(PIN_PA03, false);
+  port_pin_set_output_level(MODE_BUTTON_PULLUP_ENABLE_PIN, false);
   port_pin_set_output_level(PRECHARGE_PIN, false);
-
-  /*
-   * MODE_BUTTON_PULLUP_ENABLE_PIN is deliberately NOT driven low here.
-   *
-   * It supplies the rail the mode button switches - see handle_sleep() in
-   * dsn_protocol.c, which keeps it on for exactly that reason - so driving it
-   * low disconnects the button from everything. This used to happen about a
-   * second before bq7693_enter_sleep_mode(), leaving the button dead through
-   * the whole power-down, including the moment REGOUT collapses.
-   *
-   * The draw it was saving is imaginary. This runs immediately before SHIP,
-   * and once REGOUT is gone the pin is high impedance whether it was driven
-   * high or low - a GPIO with no supply does not hold a level. All the write
-   * bought was a guaranteed-dead button during the only window where the
-   * button might still have reached the AFE BOOT pin.
-   */
 }
 
 /**
@@ -1618,66 +1603,24 @@ static void bms_handle_sleep(void)
   /*
    * If SHIP took, REGOUT is gone and nothing below this line ever runs.
    *
-   * If it did not, we are still here - and that is not an exotic case. The
-   * BQ7693 declines SHIP while its BOOT pin is held high, which is exactly
-   * what a pack sitting in the cleaner with the mode button pressed looks
-   * like, and it gives no indication of having declined. The giveaway is that
-   * the bus still answers.
+   * If we are still executing a second later it did not take, and sitting here
+   * forever is the wrong answer: the original code relied on re-arming the
+   * watchdog and then not kicking it, which is the one path in the firmware
+   * that stops feeding the dog and also the one that never checked whether
+   * wdt_set_config() had worked. A pack that reached here could sit silent,
+   * powered and executing nothing until somebody reflashed it.
    *
-   * This used to end in a while(1) that relied on the watchdog to reset out of
-   * it. That is not a recovery: it leaves the pack apparently dead for a
-   * second at a time, and it depends on a watchdog re-arm whose return value
-   * nobody checks. Detect the refusal and go back to idling instead, which
-   * keeps the pack answering its cleaner, keeps it reachable over SWD, and
-   * lets it retry the moment whatever is holding BOOT lets go.
+   * NVIC_SystemReset() needs nothing to have been configured correctly
+   * beforehand and cannot quietly not happen.
+   *
+   * Deliberately no I2C in here. The AFE has just been told to shut down and
+   * its supply is collapsing; probing the bus through that window tells us
+   * little and is exactly the sort of thing not to do to a device mid
+   * power-down.
    */
-  delay_ms(250);
+  delay_ms(1000);
 
-  uint8_t probe;
-  if (!bq7693_read_register(SYS_STAT, 1, &probe))
-  {
-    /*
-     * Bus gone. Either SHIP took and the supply is about to collapse, in which
-     * case nothing below completes anyway, or the bus died on its own while
-     * the pack stayed powered.
-     *
-     * This used to be a while(1) with the watchdog re-armed and unkicked, on
-     * the theory that surviving would reset us back through bms_init(). It
-     * does not: bms_wdt_init()'s status was discarded, and a pack that reached
-     * here sat silent, powered and executing nothing until someone reflashed
-     * it - which looks exactly like a dead pack and is not distinguishable
-     * from one without a debugger.
-     *
-     * Reset explicitly instead. NVIC_SystemReset() needs nothing to have been
-     * configured correctly and cannot quietly not happen.
-     */
-    if (bms_wdt_init() != STATUS_OK)
-    {
-      serial_debug_send_message("BMS:WDT_REARM_FAILED\r\n");
-    }
-
-    serial_debug_send_message("BMS:SHIP_NO_BUS, resetting\r\n");
-
-    /* Let the queue drain - serial_debug_process() moves one byte per call,
-       and the message above is worth more than the 200ms it costs. */
-    sw_timer_delay_ms(200);
-
-    NVIC_SystemReset();
-  }
-
-  serial_debug_send_message("BMS:SHIP_REFUSED, staying awake\r\n");
-
-  /* The SHIP sequence cleared ADC_EN on its way past - without this the AFE
-     stops converting and every cell voltage reads zero from here on. */
-  bq7693_write_register(SYS_CTRL1, SYS_CTRL1_RUN);
-
-  /* Undo the power-down preparation, in reverse. */
-  pins_init();
-  leds_init();
-  dio_init();
-  bms_wdt_init();
-
-  bms_state = BMS_IDLE;
+  NVIC_SystemReset();
 }
 
 /** @brief Vacuum running: monitor safety while trigger held and vacuum connected. */
