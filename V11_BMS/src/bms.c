@@ -2066,6 +2066,7 @@ static void bms_handle_charging(void)
   sw_timer trigger_timeout_timer = 0;
 
   // Charge-current supervision - drives the indication only, see below.
+  sw_timer temp_log_timer         = 0;   // never started, so the first pass logs
   sw_timer charge_flow_timer      = 0;
   sw_timer noflow_led_timer       = 0;
   bool     noflow_led_on          = false;
@@ -2137,6 +2138,17 @@ static void bms_handle_charging(void)
      {
        int32_t current_abs_mA = (current_filt_mA < 0) ? -current_filt_mA : current_filt_mA;
        current_flowing = (current_abs_mA >= CHARGE_CURRENT_MIN_MA);
+     }
+
+     /*
+      * Paced separately from the charging line below, and unconditionally:
+      * a charge that is actually running is the one time the pack warms up on
+      * its own, which is when two thermistors can be seen to agree or not.
+      */
+     if (sw_timer_is_elapsed(&temp_log_timer, TEMP_LOG_PERIOD_MS))
+     {
+       sw_timer_start(&temp_log_timer);
+       bms_debug_dump_temps("chg");
      }
 
      if (current_flowing != current_flowing_prev)
@@ -2367,7 +2379,6 @@ static void bms_handle_charging(void)
         if (!current_flowing)
         {
           serial_debug_send_cell_voltages();
-          bms_debug_dump_temps("chg");
         }
         debug_print_cnt = 0;
       }
