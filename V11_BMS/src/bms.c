@@ -1646,6 +1646,28 @@ static void bms_handle_idle(void)
 /** @brief Sleep: save EEPROM, disable FETs, enter BQ7693 SHIP mode. */
 static void bms_handle_sleep(void)
 {
+  /*
+   * Do not attempt SHIP with a debugger on the port.
+   *
+   * SWDIO stays driven while the adapter is connected, so once REGOUT goes
+   * that pin's ESD clamp holds the rail near 600mV: too little to run the
+   * MCU, too much for it to be off. The pack ends up silent, unwakeable by
+   * button or charger, and looking broken in a way that points convincingly
+   * at firmware.
+   *
+   * Nothing is lost by skipping it. A pack on the bench with a programmer
+   * attached is not conserving charge for anyone, and SHIP could not have
+   * completed properly anyway - so stay awake, stay answering, and let the
+   * next idle timeout try again once the adapter is unplugged.
+   */
+  if (DSU->STATUSB.bit.DBGPRES)
+  {
+    serial_debug_send_message("BMS:DEBUGGER_ATTACHED, not entering SHIP\r\n");
+    (void)eeprom_write();
+    bms_state = BMS_IDLE;
+    return;
+  }
+
 #if !SHIP_MODE_ENABLE
   /*
    * Bench mode - see SHIP_MODE_ENABLE. Commit what we would have committed on
