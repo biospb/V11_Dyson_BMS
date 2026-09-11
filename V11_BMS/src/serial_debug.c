@@ -156,7 +156,7 @@ void serial_debug_send_cell_voltages(void)
   char tmp[30];
   uint16_t *cell_voltages = bq7693_get_cell_voltages();
 
-  serial_debug_send_message("V:");
+  serial_debug_send_message("mV:");
 
   for (int i=0; i<7; ++i)
   {
@@ -164,7 +164,7 @@ void serial_debug_send_cell_voltages(void)
     serial_debug_send_message(tmp);
   }
 
-  DEBUG_SNPRINTF(tmp, sizeof(tmp), "P: %d\r\n", bq7693_get_pack_voltage());
+  DEBUG_SNPRINTF(tmp, sizeof(tmp), "P: %d mV\r\n", bq7693_get_pack_voltage());
   serial_debug_send_message(tmp);
 #endif
 }

@@ -840,7 +840,7 @@ static void bms_set_error(enum BMS_ERROR_CODE code)
 /**  @brief Trigger state */
 static bool bms_trigger_active(void)
 {
-#if TRIGGER_TOGGLE_MODE
+#if (TRIGGER_TOGGLE_MODE == 1)
   static bool     latched    = false;
   static uint8_t  prev_level = 0;
   static sw_timer held_timer = 0;
@@ -854,12 +854,56 @@ static bool bms_trigger_active(void)
   }
   else if (level && prev_level)
   {
-    if (latched && sw_timer_is_elapsed(&held_timer, 1000))
+    if (latched && sw_timer_is_elapsed(&held_timer, TRIGGER_HOLD_MS))
       latched = false;
   }
   prev_level = level;
 
   return latched;
+
+#elif (TRIGGER_TOGGLE_MODE == 2)
+  /*
+   * Short press toggles, long press is the stock trigger.
+   *
+   * The decision is taken on RELEASE, not on the press, because until the
+   * trigger comes back up there is no telling which of the two it was. What
+   * cannot wait is the motor: the return below is latched OR physically held,
+   * so a press acts immediately either way and only its ending differs.
+   *
+   *   tap        -> the latch flips. Running stays running after release,
+   *                 stopped starts and keeps going.
+   *   press-hold -> runs while held and stops on release, exactly like mode 0.
+   *                 It also always leaves the latch clear, which makes a long
+   *                 press the way out of a latch that was set by accident -
+   *                 the same gesture whether or not you remember the state.
+   */
+  static bool     latched    = false;
+  static bool     was_long   = false;
+  static uint8_t  prev_level = 0;
+  static sw_timer held_timer = 0;
+
+  uint8_t level = dio_read(DIO_TRIGGER_PRESSED);
+
+  if (level && !prev_level)          /* pressed */
+  {
+    sw_timer_start(&held_timer);
+    was_long = false;
+  }
+  else if (!level && prev_level)     /* released */
+  {
+    latched = was_long ? false : !latched;
+  }
+  else if (level)                    /* still held */
+  {
+    if (sw_timer_is_elapsed(&held_timer, TRIGGER_HOLD_MS))
+    {
+      was_long = true;
+    }
+  }
+  prev_level = level;
+
+  return (latched || (level != 0u));
+
 #else
   return dio_read(DIO_TRIGGER_PRESSED);
 #endif
@@ -1711,6 +1755,10 @@ static void bms_handle_vacuum_running(void)
      the exit dump gets compared against. */
   serial_debug_send_cell_voltages();
 #endif
+  /* Started here, not left at zero: an unstarted timer reads as elapsed, so
+     the paced dump below would fire on the first pass and repeat the line
+     just printed. */
+  sw_timer_start(&cell_log_timer);
 
   while (1)
   {
@@ -2179,6 +2227,9 @@ static void bms_handle_charging(void)
   }
 
   sw_timer_start(&charge_flow_timer);
+  /* See bms_handle_vacuum_running() - bms_handle_charger_connected() has just
+     printed the cells, so do not have the paced dump repeat them. */
+  sw_timer_start(&cell_log_timer);
 
   charge_pause_counter = 0;
 

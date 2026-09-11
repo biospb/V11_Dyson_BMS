@@ -187,7 +187,18 @@
 #define TINY_PRINTF_ENABLE                  1
 
 // Trigger behaviour: 0 = momentary (hold to run), 1 = toggle (press to run/stop).
+// Trigger behaviour:
+//   0  stock - the motor runs while the trigger is physically held
+//   1  latch - a press toggles; holding past TRIGGER_HOLD_MS clears the latch
+//   2  hybrid - a short press toggles, a long press behaves exactly like 0
+//
+// Mode 2 exists because a latch is worth having and a latch is also worth
+// being able to ignore: a quick tap leaves the motor running, while pressing
+// and holding runs it only for as long as it is held, which is the behaviour
+// the tool shipped with and the one the hand already knows.
 #define TRIGGER_TOGGLE_MODE                 0
+// How long a press has to last to count as "held" rather than "tapped".
+#define TRIGGER_HOLD_MS                     400
 
 //-----------------------------------------------------------------------------
 // Passive cell balancing (BQ7693 internal balance FETs)
