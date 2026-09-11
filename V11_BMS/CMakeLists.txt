@@ -2,6 +2,45 @@ cmake_minimum_required(VERSION 3.20)
 
 project(samd20_firmware C ASM)
 
+# -----------------------------------------------------------------------------
+# Firmware revision, reported in the startup banner
+#
+# Re-runs configure whenever HEAD or the index changes, so committing or
+# staging refreshes the string without anyone having to remember to. Without
+# those dependencies the define is baked at configure time and quietly goes
+# stale, which is worse than not having it.
+# -----------------------------------------------------------------------------
+set(FW_GIT_REV "unknown")
+
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE FW_GIT_REV
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} diff --quiet HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        RESULT_VARIABLE FW_GIT_DIRTY
+        ERROR_QUIET
+    )
+    if(NOT FW_GIT_DIRTY EQUAL 0)
+        set(FW_GIT_REV "${FW_GIT_REV}+")
+    endif()
+
+    foreach(gitfile HEAD index)
+        if(EXISTS "${CMAKE_SOURCE_DIR}/../.git/${gitfile}")
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                         "${CMAKE_SOURCE_DIR}/../.git/${gitfile}")
+        endif()
+    endforeach()
+endif()
+
+message(STATUS "Firmware revision: ${FW_GIT_REV}")
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -170,6 +209,8 @@ file(GLOB_RECURSE SOURCES src/*.c)
 
 # Define the ELF target
 add_executable(${PROJECT_NAME}.elf ${SOURCES})
+
+target_compile_definitions(${PROJECT_NAME}.elf PRIVATE FW_GIT_REV="${FW_GIT_REV}")
 
 # -----------------------------------------------------------------------------
 # Size + HEX generation

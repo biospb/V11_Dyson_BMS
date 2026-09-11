@@ -146,10 +146,11 @@
 #define CHARGE_CURRENT_GRACE_MS             3000
 // Half-period of the "commanded but not flowing" blink.
 #define CHARGE_NO_CURRENT_LED_MS            500
-// How often to log all the thermistors while charging. A charge is slow and
-// the point is to watch the sensors track each other over it, so this is paced
-// for reading rather than for resolution.
-#define TEMP_LOG_PERIOD_MS                  10000
+
+// How often to log the cell voltages while charging or running the motor.
+// Both states also log them on entry and on exit, so this only has to cover
+// what happens in between - drift under a long charge, sag under a long run.
+#define CELL_LOG_PERIOD_MS                  30000
 
 // Once a cell reaches max charge volts, stop charging, let the pack settle,
 // then retry - this many times before declaring the pack full. The pause is

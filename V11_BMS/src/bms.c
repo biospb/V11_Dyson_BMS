@@ -34,6 +34,21 @@ static void bms_set_error(enum BMS_ERROR_CODE code);
 /*-----------------------------------------------------------------------------
     DECLARATION OF LOCAL MACROS/#DEFINES
 -----------------------------------------------------------------------------*/
+/* Set by CMake from `git rev-parse --short HEAD`, with a trailing '+' when the
+   working tree differs from it. Falls back for builds made outside CMake. */
+/*
+ * Temperatures are carried in 0.1C. Printing them as "%d.%d" needs the sign
+ * handled apart from the digits: at -0.5C the whole part is 0, so the minus
+ * would vanish and a below-zero pack would read as above it.
+ */
+#define T_SIGN(v)   ((((v) < 0) && ((v) > -10)) ? "-" : "")
+#define T_WHOLE(v)  ((int)((v) / 10))
+#define T_FRAC(v)   ((int)abs((v) % 10))
+
+#ifndef FW_GIT_REV
+#define FW_GIT_REV "unknown"
+#endif
+
 #ifdef SERIAL_DEBUG
 #define BMS_PRINT(...) \
 { \
@@ -105,8 +120,8 @@ static int32_t current_filt_mA = 0;
 
 static uint16_t charge_pause_counter = 0;
 static sw_timer bms_timer = 0;
-static int16_t  pack_temperature = 0;      /* TC1 - reported, and the cold check */
-static int16_t  pack_temperature_hot = 0;  /* max(TC1, TC2) - every hot check */
+static int16_t  pack_temperature = 0;    /* TC1 - the cold check */
+static int16_t  pack_temperature_2 = 0;  /* TC2 - against the cells */
 //volatile: set by the BQ7693 ALERT interrupt, cleared in the main loop.
 static volatile bool process_bms_interrupt = false;
 /*
@@ -163,6 +178,7 @@ static void    pins_deinit(void);
 static void    interrupts_init(void);
 static int16_t bms_read_temperature(void);
 static void    bms_sample_temperatures(void);
+static int16_t bms_temperature_hottest(void);
 static bool    bms_trigger_active(void);
 static bool    bms_is_safe_to_discharge(void);
 static bool    bms_is_safe_to_charge(void);
@@ -560,14 +576,13 @@ void bms_mainloop(void)
         bms_state = BMS_IDLE;
 #if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
         //Initial debug blurb
-        serial_debug_send_message("Dyson V11/V15 BMS After market firmware\r\n");
+        serial_debug_send_message("Dyson V11/V15 BMS After market firmware " FW_GIT_REV "\r\n");
         /* eeprom_init() runs before serial_debug_init(), which clears the
            queue, so it cannot report this itself - see eeprom_was_reset(). */
         if (eeprom_was_reset())
         {
           serial_debug_send_message("BMS:EEPROM_RESET_TO_DEFAULTS\r\n");
         }
-        bms_debug_dump_pins("boot");
 #endif
         leds_sequence();
         wdt_reset_count();
@@ -575,9 +590,6 @@ void bms_mainloop(void)
 #if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
         //Initial debug blurb
         serial_debug_send_cell_voltages();
-        //All ten channels, not just the seven the cell map claims - see there.
-        serial_debug_send_all_vc();
-        bms_adc_debug_sweep();
         bms_debug_dump_temps("boot");
         serial_debug_send_pack_capacity();
 #endif
@@ -685,7 +697,7 @@ static bool bms_balance_tick(void)
   //rather than in bq7693_balance_update() because the NTC is not the AFE's.
   bms_sample_temperatures();
 
-  if ((pack_temperature_hot / 10) >= CELL_BALANCE_MAX_TEMP)
+  if ((bms_temperature_hottest() / 10) >= CELL_BALANCE_MAX_TEMP)
   {
     bq7693_disable_balancing();
     bms_balance_status.state     = BQ_BALANCE_TOO_HOT;
@@ -729,7 +741,7 @@ static bool bms_balance_tick(void)
 
       case BQ_BALANCE_TOO_HOT:
         BMS_PRINT("BMS:BAL_HOT t=%dC max=%dC\r\n",
-                  (int)(pack_temperature_hot / 10), (int)CELL_BALANCE_MAX_TEMP);
+                  (int)(bms_temperature_hottest() / 10), (int)CELL_BALANCE_MAX_TEMP);
         break;
 
       case BQ_BALANCE_TOO_LOW:
@@ -1058,7 +1070,9 @@ static void bms_debug_dump_temps(const char *who)
   int16_t t2 = NTC_ADC2Temperature(adc_convert_channel(BMS_ADC_CH_TC2));
   uint16_t fb = adc_convert_channel(BMS_ADC_CH_CHG_FB);
 
-  BMS_PRINT("TEMP(%s) 0.1C PA07=%d PA08=%d  CHG_FB=%u\r\n", who, t1, t2, fb);
+  BMS_PRINT("TEMP(%s) PA07=%s%d.%d PA08=%s%d.%d 'C  CHG_FB=%u\r\n", who,
+            T_SIGN(t1), T_WHOLE(t1), T_FRAC(t1),
+            T_SIGN(t2), T_WHOLE(t2), T_FRAC(t2), fb);
 #else
   (void)who;
 #endif
@@ -1220,12 +1234,15 @@ static int16_t bms_read_temperature(void)
  */
 static void bms_sample_temperatures(void)
 {
-  int16_t tc2;
+  pack_temperature   = bms_read_temperature();
+  pack_temperature_2 = NTC_ADC2Temperature(adc_convert_channel(BMS_ADC_CH_TC2));
 
-  pack_temperature = bms_read_temperature();
-  tc2              = NTC_ADC2Temperature(adc_convert_channel(BMS_ADC_CH_TC2));
+}
 
-  pack_temperature_hot = (tc2 > pack_temperature) ? tc2 : pack_temperature;
+/** @brief The higher of the two thermistors, in 0.1C. */
+static int16_t bms_temperature_hottest(void)
+{
+  return (pack_temperature_2 > pack_temperature) ? pack_temperature_2 : pack_temperature;
 }
 
 /**
@@ -1275,7 +1292,7 @@ static bool bms_is_safe_to_discharge(void)
   //the two sensors, cold on TC1 alone. See bms_sample_temperatures().
   bms_sample_temperatures();
   int temp     = pack_temperature / 10;
-  int temp_hot = pack_temperature_hot / 10;
+  int temp_hot = bms_temperature_hottest() / 10;
 
   if (temp_hot > MAX_PACK_TEMPERATURE)
   {
@@ -1371,7 +1388,7 @@ static bool bms_is_safe_to_charge(void)
   //for why hot and cold do not use the same reading.
   bms_sample_temperatures();
   int temp     = pack_temperature / 10;
-  int temp_hot = pack_temperature_hot / 10;
+  int temp_hot = bms_temperature_hottest() / 10;
 
   if (temp_hot >= MAX_PACK_CHARGE_TEMP || temp_hot >= MAX_PACK_TEMPERATURE)
   {
@@ -1666,6 +1683,7 @@ static void bms_handle_vacuum_running(void)
 #ifdef SERIAL_DEBUG
   uint8_t debug_print_cnt = 0;
 #endif
+  sw_timer cell_log_timer = 0;   // never started, so the first pass logs
 
   //Never bleed cells while the motor is drawing current.
   bms_balance_stop();
@@ -1688,6 +1706,12 @@ static void bms_handle_vacuum_running(void)
   }
   dsn_prot_set_trigger(true);
 
+#ifdef SERIAL_DEBUG
+  /* What the cells looked like before the motor touched them - the reference
+     the exit dump gets compared against. */
+  serial_debug_send_cell_voltages();
+#endif
+
   while (1)
   {
     if (!bms_is_safe_to_discharge())
@@ -1705,6 +1729,17 @@ static void bms_handle_vacuum_running(void)
       return;
     }
 
+#ifdef SERIAL_DEBUG
+    /* Under 21A the cells sag, and how evenly they sag is the interesting
+       part. Paced rather than per-pass: this loop runs every 60ms and nothing
+       meaningful moves that fast. */
+    if (sw_timer_is_elapsed(&cell_log_timer, CELL_LOG_PERIOD_MS))
+    {
+      sw_timer_start(&cell_log_timer);
+      serial_debug_send_cell_voltages();
+    }
+#endif
+
     if (bms_fault_pending())
     {
       /* raised from interrupt context - honour it instead of overwriting it */
@@ -1718,6 +1753,13 @@ static void bms_handle_vacuum_running(void)
     {
       dsn_prot_set_trigger(false);
       leds_off();
+#ifdef SERIAL_DEBUG
+      /* What the motor left behind: the cells have just been through the
+         heaviest load they ever see, and this is where sag and imbalance show
+         up while they are still warm. */
+      bms_debug_dump_temps("vac_end");
+      serial_debug_send_cell_voltages();
+#endif
       bms_state = BMS_IDLE;
       return;
     }
@@ -1725,10 +1767,7 @@ static void bms_handle_vacuum_running(void)
 #ifdef SERIAL_DEBUG
     if(++debug_print_cnt > 5)
     {
-      BMS_PRINT("BMS:VACUUM_RUNNING I:%d mA @ %ld mAH, C:%ld mAH, T:%d 'C, P:%d mV\r\n", abs(current_filt_mA), (eeprom_data.current_charge_level / 1000), (eeprom_data.total_pack_capacity / 1000), (int16_t)(pack_temperature / 10), bq7693_get_pack_voltage());
-      /* The motor is the only heat source available on a bench - this is how
-         the three sensors get compared across a real temperature range. */
-      bms_debug_dump_temps("vac");
+      BMS_PRINT("BMS:VACUUM_RUNNING I:%d mA @ %ld mAH, C:%ld mAH, T:%s%d.%d/%s%d.%d 'C, P:%d mV\r\n", abs(current_filt_mA), (eeprom_data.current_charge_level / 1000), (eeprom_data.total_pack_capacity / 1000), T_SIGN(pack_temperature), T_WHOLE(pack_temperature), T_FRAC(pack_temperature), T_SIGN(pack_temperature_2), T_WHOLE(pack_temperature_2), T_FRAC(pack_temperature_2), bq7693_get_pack_voltage());
       debug_print_cnt = 0;
     }
 #endif
@@ -1760,6 +1799,9 @@ static void bms_handle_fault(void)
      dumped here too - both questions are settled (the cell map is correct,
      TS1/TS2 have nothing connected), so they are boot-only now. */
   serial_debug_send_cell_voltages();
+  /* All ten channels, including the three the cell map does not use: a fault
+     is where a wrong map or a disturbed measurement group would show. */
+  serial_debug_send_all_vc();
   bms_debug_dump_temps("fault");
 #endif
 
@@ -1911,6 +1953,9 @@ static void bms_handle_fault(void)
 static void bms_handle_charger_connected(void)
 {
   bms_debug_dump_temps("chg_in");
+#ifdef SERIAL_DEBUG
+  serial_debug_send_cell_voltages();
+#endif
 
   if (bms_is_pack_full())
   {
@@ -2103,7 +2148,7 @@ static void bms_handle_charging(void)
   sw_timer trigger_timeout_timer = 0;
 
   // Charge-current supervision - drives the indication only, see below.
-  sw_timer temp_log_timer         = 0;   // never started, so the first pass logs
+  sw_timer cell_log_timer         = 0;   // never started, so the first pass logs
   sw_timer charge_flow_timer      = 0;
   sw_timer noflow_led_timer       = 0;
   bool     noflow_led_on          = false;
@@ -2116,22 +2161,12 @@ static void bms_handle_charging(void)
     return;
   }
 
-  /*
-   * Entering this state changes three things at once - DSG off, the external
-   * charge-enable pin high, CHG_ON in the AFE - and an analogue reading that
-   * moves "on entry to charging" says nothing about which of them did it.
-   * Sampling between each step attributes the change to one action.
-   */
-  bms_debug_dump_temps("pre");
-
   // Disable the discharge FET while charging; precharge pin stays asserted
   // by dsn_protocol so the vacuum keeps logic power.
   bq7693_disable_discharge();
-  bms_debug_dump_temps("dsg_off");
 
   //Enable charging.
   port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
-  bms_debug_dump_temps("pa01_hi");
 
   //Enable the charge FET in the BQ7693.
   if (!bms_charge_fet_on())
@@ -2142,8 +2177,6 @@ static void bms_handle_charging(void)
     bms_state = BMS_FAULT;
     return;
   }
-
-  bms_debug_dump_temps("chg_on");
 
   sw_timer_start(&charge_flow_timer);
 
@@ -2177,16 +2210,13 @@ static void bms_handle_charging(void)
        current_flowing = (current_abs_mA >= CHARGE_CURRENT_MIN_MA);
      }
 
-     /*
-      * Paced separately from the charging line below, and unconditionally:
-      * a charge that is actually running is the one time the pack warms up on
-      * its own, which is when two thermistors can be seen to agree or not.
-      */
-     if (sw_timer_is_elapsed(&temp_log_timer, TEMP_LOG_PERIOD_MS))
+#ifdef SERIAL_DEBUG
+     if (sw_timer_is_elapsed(&cell_log_timer, CELL_LOG_PERIOD_MS))
      {
-       sw_timer_start(&temp_log_timer);
-       bms_debug_dump_temps("chg");
+       sw_timer_start(&cell_log_timer);
+       serial_debug_send_cell_voltages();
      }
+#endif
 
      if (current_flowing != current_flowing_prev)
      {
@@ -2412,11 +2442,7 @@ static void bms_handle_charging(void)
        */
       if(++debug_print_cnt > (current_flowing ? 5u : 20u))
       {
-        BMS_PRINT("BMS:CHARGING I:%d mA @ %ld mAH, C:%ld mAH, T:%d 'C, P:%d mV\r\n", abs(current_filt_mA), (eeprom_data.current_charge_level / 1000), (eeprom_data.total_pack_capacity / 1000), (int16_t)(pack_temperature / 10), bq7693_get_pack_voltage());
-        if (!current_flowing)
-        {
-          serial_debug_send_cell_voltages();
-        }
+        BMS_PRINT("BMS:CHARGING I:%d mA @ %ld mAH, C:%ld mAH, T:%s%d.%d/%s%d.%d 'C, P:%d mV\r\n", abs(current_filt_mA), (eeprom_data.current_charge_level / 1000), (eeprom_data.total_pack_capacity / 1000), T_SIGN(pack_temperature), T_WHOLE(pack_temperature), T_FRAC(pack_temperature), T_SIGN(pack_temperature_2), T_WHOLE(pack_temperature_2), T_FRAC(pack_temperature_2), bq7693_get_pack_voltage());
         debug_print_cnt = 0;
       }
 #endif
