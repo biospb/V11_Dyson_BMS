@@ -2250,6 +2250,8 @@ static void bms_handle_charging(void)
   // Charge-current supervision - drives the indication only, see below.
   sw_timer cell_log_timer         = 0;   // never started, so the first pass logs
   sw_timer charge_flow_timer      = 0;
+  // Separate and much longer: this one does act, see CHARGE_NO_CURRENT_TIMEOUT_MS.
+  sw_timer noflow_timeout         = 0;
   sw_timer noflow_led_timer       = 0;
   bool     noflow_led_on          = false;
   bool     current_flowing_prev   = true;
@@ -2279,6 +2281,7 @@ static void bms_handle_charging(void)
   }
 
   sw_timer_start(&charge_flow_timer);
+  sw_timer_start(&noflow_timeout);
   /* See bms_handle_vacuum_running() - bms_handle_charger_connected() has just
      printed the cells, so do not have the paced dump repeat them. */
   sw_timer_start(&cell_log_timer);
@@ -2320,6 +2323,31 @@ static void bms_handle_charging(void)
        serial_debug_send_cell_voltages();
      }
 #endif
+
+     /*
+      * Current flowing resets the clock; the absence of it runs it down. A
+      * pack that cannot charge must not sit on a dead dock emptying itself -
+      * see CHARGE_NO_CURRENT_TIMEOUT_MS for what that cost the first time.
+      */
+     if (current_flowing)
+     {
+       sw_timer_start(&noflow_timeout);
+     }
+     else if (sw_timer_is_elapsed(&noflow_timeout, CHARGE_NO_CURRENT_TIMEOUT_MS))
+     {
+       port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+       bq7693_disable_charge();
+       bms_balance_stop();
+       leds_off();
+
+       serial_debug_send_message("BMS:CHARGE_NO_CURRENT timeout, shutting down\r\n");
+#ifdef SERIAL_DEBUG
+       serial_debug_send_cell_voltages();
+       bms_debug_dump_pins("no_current");
+#endif
+       bms_state = BMS_SLEEP;
+       return;
+     }
 
      if (current_flowing != current_flowing_prev)
      {
@@ -2519,9 +2547,10 @@ static void bms_handle_charging(void)
       {
         //Restart charging
         port_pin_set_output_level(ENABLE_CHARGE_PIN, true);
-        //The pause left the current at zero by design - do not let the
+        //The pause left the current at zero by design - do not let either
         //supervision above read that as a dead charger.
         sw_timer_start(&charge_flow_timer);
+        sw_timer_start(&noflow_timeout);
         if (!bms_charge_fet_on())
         {
           port_pin_set_output_level(ENABLE_CHARGE_PIN, false);

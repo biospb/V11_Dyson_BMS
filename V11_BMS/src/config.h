@@ -146,6 +146,36 @@
 #define CHARGE_CURRENT_GRACE_MS             3000
 // Half-period of the "commanded but not flowing" blink.
 #define CHARGE_NO_CURRENT_LED_MS            500
+// Give up and shut the pack down after this long with the charge commanded and
+// nothing flowing.
+//
+// This is the failure that destroyed the cells this firmware was first run on.
+// A fuse in the charge path had blown, so the pack could not take charge - but
+// it could still see a charger, so it sat on the dock indefinitely, running
+// the MCU and the AFE from the cells it was trying to fill, until every one of
+// them was at zero. Nothing in the firmware ever asked whether the charging it
+// was performing was achieving anything.
+//
+// Five minutes is far beyond any legitimate delay - the current supervision
+// itself settles in CHARGE_CURRENT_GRACE_MS - and far below the days it takes
+// to empty a pack. On a dock that has genuinely failed, the pack sleeps
+// instead of draining, and retries when it is next docked.
+#define CHARGE_NO_CURRENT_TIMEOUT_MS        (5 * 60 * 1000ul)
+// Give up and shut the pack down after this long with the charge commanded and
+// nothing flowing.
+//
+// This is the failure that destroyed the cells this firmware was first run on.
+// A fuse in the charge path had blown, so the pack could not take charge - but
+// it could still see a charger, so it sat on the dock indefinitely, running
+// the MCU and the AFE from the cells it was trying to fill, until every one of
+// them was at zero. Nothing in the firmware ever asked whether the charging it
+// was performing was achieving anything.
+//
+// Five minutes is far beyond any legitimate delay - the current supervision
+// itself settles in CHARGE_CURRENT_GRACE_MS - and far below the days it takes
+// to empty a pack. On a dock that has genuinely failed, the pack sleeps
+// instead of draining, and retries when it is next docked.
+#define CHARGE_NO_CURRENT_TIMEOUT_MS        (5 * 60 * 1000ul)
 
 // How often to log the cell voltages while charging or running the motor.
 // Both states also log them on entry and on exit, so this only has to cover
