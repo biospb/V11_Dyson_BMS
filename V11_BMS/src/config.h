@@ -192,11 +192,13 @@
 //   1  latch - a press toggles; holding past TRIGGER_HOLD_MS clears the latch
 //   2  hybrid - a short press toggles, a long press behaves exactly like 0
 //
-// Mode 2 exists because a latch is worth having and a latch is also worth
-// being able to ignore: a quick tap leaves the motor running, while pressing
-// and holding runs it only for as long as it is held, which is the behaviour
-// the tool shipped with and the one the hand already knows.
-#define TRIGGER_TOGGLE_MODE                 0
+// Mode 2 is the default because it is a superset rather than a replacement: a
+// quick tap leaves the motor running, while pressing and holding runs it only
+// for as long as it is held, which is the behaviour the tool shipped with and
+// the one the hand already knows. Neither gesture has to be learned at the
+// expense of the other, and a long press always ends with the latch clear, so
+// it doubles as the way out of one set by accident.
+#define TRIGGER_TOGGLE_MODE                 2
 // How long a press has to last to count as "held" rather than "tapped".
 #define TRIGGER_HOLD_MS                     400
 

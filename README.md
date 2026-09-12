@@ -163,6 +163,26 @@ start; the indication clears by itself the moment current appears.
 `BMS:CHARGING current ABSENT` / `... flowing` mark the transitions in the debug
 log.
 
+## Trigger
+
+`TRIGGER_TOGGLE_MODE` in `config.h` selects how the trigger behaves:
+
+| Mode | Behaviour |
+|------|-----------|
+| 0 | Stock - the motor runs for exactly as long as the trigger is held |
+| 1 | Latch - every press toggles; a press held past `TRIGGER_HOLD_MS` clears it |
+| **2** | **Default** - a short press toggles, a long press behaves exactly like mode 0 |
+
+Mode 2 keeps both gestures rather than replacing one with the other. A tap
+leaves the motor running so it need not be held through a long job; a press
+and hold runs it only while held, which is what the tool shipped with. Because
+a long press always ends with the latch clear, it is also the way out of a
+latch set by accident - the same gesture whether or not you remember the
+state.
+
+Which kind of press it was can only be known on release, so the motor responds
+to the press itself either way and only the ending differs.
+
 ## Fault Codes
 
 When the BMS faults, both LEDs blink a pattern, pause, and repeat. **The
