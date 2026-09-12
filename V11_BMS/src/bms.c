@@ -2797,6 +2797,7 @@ static void bms_handle_charging(void)
       if (bms_in_storage_mode())
       {
         BMS_PRINT("BMS:CHARGING Stopped at storage level\r\n");
+        (void)eeprom_write();
         return;
       }
 
@@ -2833,6 +2834,22 @@ static void bms_handle_charging(void)
 
       // we are full
       eeprom_data.current_charge_level = eeprom_data.total_pack_capacity;
+
+      /*
+       * Commit here, where the learning happened.
+       *
+       * The commit points were sleep and fault, on the theory that sleep is
+       * where a pack always ends up. A docked pack does not sleep - it goes to
+       * standby, which keeps RAM but writes nothing - so a capacity just
+       * learned could sit uncommitted for weeks and be lost to any power cut,
+       * or to a reflash. It was: a charge that finished at 4249mAh came back
+       * as the 2250 seed.
+       *
+       * A rare event with both FETs off, and eeprom_write() skips the erase
+       * when nothing has changed, so it costs nothing to put the commit where
+       * the value is actually produced.
+       */
+      (void)eeprom_write();
 
       BMS_PRINT("BMS:CHARGING Stopped\r\n");
 #ifdef SERIAL_DEBUG
