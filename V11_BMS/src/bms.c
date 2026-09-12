@@ -183,6 +183,7 @@ static bool    bms_trigger_active(void);
 static bool    bms_is_safe_to_discharge(void);
 static bool    bms_is_safe_to_charge(void);
 static bool    bms_is_pack_full(void);
+static bool    bms_in_storage_mode(void);
 static void    bms_handle_idle(void);
 static void    bms_handle_sleep(void);
 static void    bms_handle_vacuum_running(void);
@@ -1520,17 +1521,44 @@ static bool bms_is_safe_to_charge(void)
 }
 
 /**
+ * @brief True when this pack has been sitting unused long enough to store.
+ *
+ * A pack in service is emptied and refilled every few days; one that has gone
+ * STORAGE_IDLE_WAKES standby periods without the motor running is not waiting
+ * to be picked up, it is being kept. Holding lithium near full is the single
+ * cheapest way to age it for nothing, so such a pack is allowed to sit lower.
+ *
+ * Counted in EEPROM rather than RAM because the count only means anything over
+ * weeks, and the pack may lose power in between - it is incremented on each
+ * RTC wake and cleared the moment the motor runs.
+ */
+static bool bms_in_storage_mode(void)
+{
+  return (eeprom_data.idle_wakes >= STORAGE_IDLE_WAKES);
+}
+
+/**
  * @brief Check if any cell reached full charge voltage (with hysteresis).
  * @return true if any cell is at/above threshold.
  */
 static bool bms_is_pack_full(void)
 {
   uint16_t *cell_voltages = bq7693_get_cell_voltages();
+  const bool storage = bms_in_storage_mode();
 
-  // Use hysteresis: apply the lower release threshold when pack was already full
-  uint16_t threshold = (bms_state == BMS_CHARGING)
-                     ? CELL_FULL_CHARGE_VOLTAGE          // 4170mV
-                     : CELL_FULL_CHARGE_RELEASE_VOLTAGE; // 4100mV
+  // Use hysteresis: apply the lower release threshold when pack was already
+  // full. A stored pack uses the same pair shifted down, so the whole
+  // pause/top-up machinery above works unchanged against a lower target.
+  uint16_t threshold;
+
+  if (bms_state == BMS_CHARGING)
+  {
+    threshold = storage ? CELL_STORAGE_CHARGE_VOLTAGE : CELL_FULL_CHARGE_VOLTAGE;
+  }
+  else
+  {
+    threshold = storage ? CELL_STORAGE_RELEASE_VOLTAGE : CELL_FULL_CHARGE_RELEASE_VOLTAGE;
+  }
 
   for (int i=0; i<7; ++i)
   {
@@ -1800,6 +1828,18 @@ static void bms_handle_vacuum_running(void)
     bms_state = BMS_FAULT;
     return;
   }
+  /*
+   * The pack is in service. Cleared in RAM only: the next commit carries it to
+   * flash, and a flash erase is not something to start while the motor is
+   * about to pull twenty amps. Losing the clear to a power cut costs nothing -
+   * the count is weeks long and this happens every time the trigger is used.
+   */
+  if (eeprom_data.idle_wakes != 0u)
+  {
+    eeprom_data.idle_wakes = 0;
+    serial_debug_send_message("BMS:IN_SERVICE, storage idle count cleared\r\n");
+  }
+
   dsn_prot_set_trigger(true);
 
 #ifdef SERIAL_DEBUG
@@ -2243,6 +2283,24 @@ static void bms_handle_charger_connected_not_charging(void)
       {
         rtc_wakeup_flag = false;
         serial_debug_send_message("BMS:RTC_WAKE\r\n");
+
+        /*
+         * Another standby period gone by on a dock with nobody using the pack.
+         * Committed here because this is a rare event with the FETs off, and
+         * because the count has to survive the pack losing power - which is
+         * the whole difference between "docked for a fortnight" and "docked
+         * since the last time anyone looked".
+         */
+        if (   !dsn_prot_get_vacuum_connected()
+            && (eeprom_data.idle_wakes < STORAGE_IDLE_WAKES))
+        {
+          eeprom_data.idle_wakes++;
+          (void)eeprom_write();
+          BMS_PRINT("BMS:IDLE_WAKES=%lu of %lu%s\r\n",
+                    (unsigned long)eeprom_data.idle_wakes,
+                    (unsigned long)STORAGE_IDLE_WAKES,
+                    bms_in_storage_mode() ? " - storage mode" : "");
+        }
       }
       else
       {
@@ -2658,6 +2716,20 @@ static void bms_handle_charging(void)
       leds_off();
 
       bms_state = BMS_CHARGER_CONNECTED_NOT_CHARGING;
+
+      /*
+       * None of the learning below applies to a charge that stopped at the
+       * storage level. The pack is not full, so calling the coulombs counted
+       * "the capacity" would shrink the learned figure by a third, and
+       * declaring the level equal to it would put the gauge at 100% on a pack
+       * holding about sixty percent. The coulomb counter carries on tracking
+       * the real level either way - that part needs no help.
+       */
+      if (bms_in_storage_mode())
+      {
+        BMS_PRINT("BMS:CHARGING Stopped at storage level\r\n");
+        return;
+      }
 
       if (eeprom_data.full_discharge_seen)
       {

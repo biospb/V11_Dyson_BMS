@@ -37,7 +37,7 @@
  * fuse, which the programmer does not touch, so stored data survives a
  * reflash - including a charge level a fault zeroed on the way down.
  */
-#define EEPROM_MAGIC  0x424D5301ul   /* 'B','M','S', layout revision 1 */
+#define EEPROM_MAGIC  0x424D5302ul   /* 'B','M','S', layout revision 2 */
 
 /*
  * A struct to represent the stored eeprom data.
@@ -60,6 +60,7 @@ struct eeprom_data
   int32_t  total_pack_capacity;   //micro-amp-hours
   int32_t  current_charge_level;  //micro-amp-hours
   uint32_t full_discharge_seen;   //capacity calibration flag
+  uint32_t idle_wakes;            //standby wakes with no use - see STORAGE_IDLE_WAKES
   uint32_t crc32;
 } ;
 

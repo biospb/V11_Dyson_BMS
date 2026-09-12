@@ -42,6 +42,7 @@ void eeprom_write_defaults(void)
   eeprom_data.total_pack_capacity      = (PACK_MAX_CAPACITY_MAH       * 1000ul);  //in micro-amp-hours
   eeprom_data.current_charge_level     = ((PACK_MAX_CAPACITY_MAH / 2) * 1000ul);
   eeprom_data.full_discharge_seen      = 0;
+  eeprom_data.idle_wakes               = 0;
   eeprom_write();
 }
 
@@ -126,6 +127,7 @@ int eeprom_read(void)
   eeprom_shadow.total_pack_capacity  = eeprom_data.total_pack_capacity;
   eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
   eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
+  eeprom_shadow.idle_wakes           = eeprom_data.idle_wakes;
   eeprom_shadow_valid = true;
   return 0;
 }
@@ -172,7 +174,8 @@ bool eeprom_write(void)
    */
   if (eeprom_shadow_valid
       && (eeprom_data.total_pack_capacity == eeprom_shadow.total_pack_capacity)
-      && (eeprom_data.full_discharge_seen == eeprom_shadow.full_discharge_seen))
+      && (eeprom_data.full_discharge_seen == eeprom_shadow.full_discharge_seen)
+      && (eeprom_data.idle_wakes          == eeprom_shadow.idle_wakes))
   {
     int32_t drift = eeprom_data.current_charge_level - eeprom_shadow.current_charge_level;
 
@@ -199,6 +202,7 @@ bool eeprom_write(void)
   eeprom_shadow.total_pack_capacity  = eeprom_data.total_pack_capacity;
   eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
   eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
+  eeprom_shadow.idle_wakes           = eeprom_data.idle_wakes;
   eeprom_shadow_valid = true;
   return true;   //written
 }

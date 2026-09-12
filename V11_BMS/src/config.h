@@ -66,8 +66,34 @@
 // BMS_ERR_CELL_FAIL rather than BMS_ERR_PACK_DISCHARGED, which matters
 // because the discharged path zeroes the fuel gauge.
 #define CELL_IMPLAUSIBLE_VOLTAGE            500     //mV
-#define CELL_FULL_CHARGE_VOLTAGE            4170    //mV - fully charged cell voltage. Original BMS serial log shows cells charging to 4.17V.
-#define CELL_FULL_CHARGE_RELEASE_VOLTAGE    4100    //mV - resume charging below this (70mV hysteresis)
+// Measured UNDER the charge current, so it includes the IR drop across the
+// cell - about 19mV at 1A on a healthy pack. 4150 here is therefore roughly
+// 4130 at rest, against the 4170 (≈4150 at rest) the original BMS used.
+// Cheap trade: a couple of percent of capacity for a slower-aging cell.
+#define CELL_FULL_CHARGE_VOLTAGE            4150    //mV
+#define CELL_FULL_CHARGE_RELEASE_VOLTAGE    4080    //mV - resume charging below this (70mV hysteresis)
+
+// Storage mode - see bms_in_storage_mode().
+//
+// A pack that has not been used in weeks is not waiting to be grabbed, it is
+// being stored, and holding lithium near full is the one thing that ages it
+// for nothing. These are the same two thresholds as above, shifted down: the
+// pack is simply not topped up until it has drifted to the release level, and
+// then only to the storage level rather than to full.
+//
+// Nothing is ever discharged to reach them. The pack drifts down on its own
+// leakage, which takes months - the point is to stop fighting that drift, not
+// to force it.
+#define CELL_STORAGE_CHARGE_VOLTAGE         3950    //mV
+#define CELL_STORAGE_RELEASE_VOLTAGE        3880    //mV
+
+// How many RTC standby wakes with no use before a docked pack is treated as
+// stored. The standby timer runs at RTC_STANDBY_WAKE_TICKS - two days - so
+// seven of them is a fortnight untouched.
+//
+// Any run of the motor clears the count, so a pack in service never reaches
+// this and a stored one returns to charging fully the first time it is used.
+#define STORAGE_IDLE_WAKES                  7
 
 #define CELL_OVERVOLTAGE_TRIP               4250    //BMS will trip out at this voltage - NB DO NOT set outside of 3150mV - 4700mV or it wont' work! 
 #define CELL_UNDERVOLTAGE_TRIP              2450    //BMS will trip out at this voltage - NB DO NOT set outside of 1700mv - 3000mV or it wont' work!
