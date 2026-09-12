@@ -2697,6 +2697,13 @@ static void bms_handle_charging(void)
         //supervision above read that as a dead charger.
         sw_timer_start(&charge_flow_timer);
         sw_timer_start(&noflow_timeout);
+        /* And the cell dump, which otherwise fires on the first pass after the
+           pause - while the current is still ramping. The AFE samples the
+           seven channels in sequence, so each one catches a different point of
+           the ramp and the readings come out scrambled: cells that have held
+           the same order for hours appear to swap places. Nothing is wrong;
+           the snapshot is just taken across a moving target. */
+        sw_timer_start(&cell_log_timer);
         if (!bms_charge_fet_on())
         {
           port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
