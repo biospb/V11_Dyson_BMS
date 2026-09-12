@@ -2093,9 +2093,10 @@ static void bms_handle_charger_connected(void)
 /** @brief Not charging: manage standby sleep while charger is connected. */
 static void bms_handle_charger_connected_not_charging(void)
 {
-  sw_timer relax_timer   = 0;
-  sw_timer recheck_timer = 0;
-  bool     balancing     = false;
+  sw_timer relax_timer    = 0;
+  sw_timer recheck_timer  = 0;
+  sw_timer dock_idle_timer = 0;
+  bool     balancing      = false;
   //Do not drop into standby before balancing has had a chance to look at the
   //pack - the vacuum usually asks to sleep within a second or two of docking,
   //and the next RTC wake is days away. Always false when balancing is compiled
@@ -2108,6 +2109,7 @@ static void bms_handle_charger_connected_not_charging(void)
   //settle before the first balancing decision is taken.
   sw_timer_start(&relax_timer);
   sw_timer_start(&recheck_timer);
+  sw_timer_start(&dock_idle_timer);
 
   while(1)
   {
@@ -2171,7 +2173,25 @@ static void bms_handle_charger_connected_not_charging(void)
       }
     }
 
-    if (dsn_prot_get_sleep_flag() == true)
+    /*
+     * Two ways to end up asleep on a dock.
+     *
+     * A pack in a cleaner is told: the cleaner asks within a second or two of
+     * docking, and that is the path this state was written for.
+     *
+     * A pack sitting in a charger by itself is never asked, and used to stay
+     * awake for as long as it was left there - months, on a spare - burning
+     * the cells through the MCU and the AFE and topping itself back up every
+     * five minutes to cover it. So time it out instead. The cleaner being
+     * connected re-arms the timer, so nothing changes for a pack that has one.
+     */
+    if (dsn_prot_get_vacuum_connected())
+    {
+      sw_timer_start(&dock_idle_timer);
+    }
+
+    if (   (dsn_prot_get_sleep_flag() == true)
+        || sw_timer_is_elapsed(&dock_idle_timer, DOCK_STANDBY_IDLE_MS))
     {
       if (balancing || !balance_evaluated)
       {

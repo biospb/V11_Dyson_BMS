@@ -180,6 +180,21 @@
 // what happens in between - drift under a long charge, sag under a long run.
 #define CELL_LOG_PERIOD_MS                  30000
 
+// How long a fully charged pack stays awake on a dock with no cleaner talking
+// to it before dropping into standby of its own accord.
+//
+// A pack inside a cleaner is told when to sleep: the cleaner asks, within a
+// second or two of docking. A pack sitting in a charger on its own is never
+// asked, and without this it would stay awake indefinitely - running the MCU
+// and the AFE from the cells with the charge FET off, and topping itself back
+// up every FULL_CHARGE_RECHECK_MS to pay for it. That is a charger a pack can
+// live in for months.
+//
+// Standby rather than SHIP, deliberately: the RTC still wakes it to re-check
+// and top up, and pulling it off the dock or the trigger wakes it at once.
+// Balancing holds it off regardless - see where this is used.
+#define DOCK_STANDBY_IDLE_MS                (5 * 60 * 1000ul)
+
 // Once a cell reaches max charge volts, stop charging, let the pack settle,
 // then retry - this many times before declaring the pack full. The pause is
 // also when the balancer gets to work on the charge path, and it only starts
