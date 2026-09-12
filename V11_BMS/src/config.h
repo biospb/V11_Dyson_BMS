@@ -287,9 +287,36 @@
 // Start bleeding a cell once it is this far above the lowest cell...
 #define CELL_BALANCE_START_MV               30      //mV
 // ...and stop that cell once it is back within this of the lowest (hysteresis).
-#define CELL_BALANCE_STOP_MV                10      //mV
+#define CELL_BALANCE_STOP_MV                20      //mV
 // Whole pack is considered balanced once max-min drops below this.
-#define CELL_BALANCE_TARGET_SPREAD_MV       15      //mV
+#define CELL_BALANCE_TARGET_SPREAD_MV       25      //mV
+
+/*
+ * All three MUST stay above the AFE's inter-group measurement offset.
+ *
+ * The BQ76930 measures in two groups with separate references - VC1..VC5 and
+ * VC6..VC10 - and they do not agree exactly. On the pack these numbers were
+ * tuned against, group one reads about 10mV high and group two about 3mV low,
+ * measured against a meter: a 13mV step that is constant from 3.6V to 4.15V,
+ * which is what tells it apart from a real imbalance. A real one grows towards
+ * the top of the charge; an offset does not.
+ *
+ * What that costs if a threshold sits below it:
+ *
+ *   START below  - balancing triggers on the offset alone and bleeds healthy
+ *                  cells, making a well-matched pack worse.
+ *   TARGET below - the pack can never be declared balanced, because the
+ *                  measured spread has a floor it cannot go under.
+ *   STOP below   - a cell in the high group can never satisfy its own stop
+ *                  condition, and only the pack-wide TARGET ends its bleed.
+ *
+ * STOP and TARGET were 10 and 15 and sat under that floor. The cost of raising
+ * them is that a pack is called balanced with about 12mV of real spread left,
+ * which is nothing next to the hundreds that make balancing worth doing.
+ *
+ * Do not lower these to "make balancing testable" on a healthy pack. It will
+ * balance, and it will be wrong.
+ */
 
 // Only balance near the top of charge, where cell voltage actually tracks SOC.
 // Gated on the HIGHEST cell so a weak cell cannot block balancing forever.

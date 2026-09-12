@@ -2156,6 +2156,7 @@ static void bms_handle_charger_connected_not_charging(void)
   sw_timer relax_timer    = 0;
   sw_timer recheck_timer  = 0;
   sw_timer dock_idle_timer = 0;
+  sw_timer cell_log_timer  = 0;
   bool     balancing      = false;
   //Do not drop into standby before balancing has had a chance to look at the
   //pack - the vacuum usually asks to sleep within a second or two of docking,
@@ -2170,9 +2171,29 @@ static void bms_handle_charger_connected_not_charging(void)
   sw_timer_start(&relax_timer);
   sw_timer_start(&recheck_timer);
   sw_timer_start(&dock_idle_timer);
+  sw_timer_start(&cell_log_timer);
 
   while(1)
   {
+#ifdef SERIAL_DEBUG
+    /*
+     * This state printed nothing at all, and a pack spends most of its life
+     * here - balancing, waiting out the top-up recheck, counting down to
+     * standby. Silence is indistinguishable from a hang, and there is no way
+     * to see balancing working or the cells drifting between top-ups.
+     *
+     * It stops on its own: once standby is entered the loop blocks inside
+     * system_sleep(), so this costs a handful of lines per dock and nothing
+     * thereafter.
+     */
+    if (sw_timer_is_elapsed(&cell_log_timer, CELL_LOG_PERIOD_MS))
+    {
+      sw_timer_start(&cell_log_timer);
+      serial_debug_send_cell_voltages();
+      bms_debug_dump_temps("dock");
+    }
+#endif
+
     if (bms_fault_pending())
     {
       /* raised from interrupt context - honour it instead of overwriting it */
