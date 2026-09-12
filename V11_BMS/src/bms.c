@@ -2191,6 +2191,27 @@ static void bms_handle_charger_connected_not_charging(void)
       sw_timer_start(&cell_log_timer);
       serial_debug_send_cell_voltages();
       bms_debug_dump_temps("dock");
+
+      /*
+       * Every input the standby decision below is made from, because when it
+       * does not happen the log gives no way to tell which of them is holding
+       * it. Four booleans and a countdown answer it outright instead of
+       * leaving the state looking hung.
+       *
+       * vac  - a connected cleaner re-arms the idle timer every pass
+       * slp  - the cleaner has asked to sleep, which bypasses the timer
+       * bal  - cells are bleeding, which holds standby off deliberately
+       * eval - balancing has not had its first look yet (20s after entry)
+       * idle - seconds counted towards DOCK_STANDBY_IDLE_MS; "done" once the
+       *        timer has fired, since sw_timer_is_elapsed() stops it
+       */
+      BMS_PRINT("DOCK vac=%u slp=%u bal=%u eval=%u idle=%lu/%lus\r\n",
+                dsn_prot_get_vacuum_connected() ? 1u : 0u,
+                dsn_prot_get_sleep_flag()       ? 1u : 0u,
+                balancing                       ? 1u : 0u,
+                balance_evaluated               ? 1u : 0u,
+                (unsigned long)(sw_timer_get_elapsed_time(&dock_idle_timer) / 1000ul),
+                (unsigned long)(DOCK_STANDBY_IDLE_MS / 1000ul));
     }
 #endif
 
