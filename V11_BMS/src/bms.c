@@ -1891,6 +1891,7 @@ static void bms_handle_fault(void)
                           && (original_error <= BMS_ERR_SHORTCIRCUIT));
   sw_timer retry_timer = 0;
   sw_timer fault_timer = 0;
+  sw_timer giveup_timer = 0;
 
   BMS_PRINT("BMS:FAULT err=%d auto_recover=%d\r\n", original_error, auto_recover);
 #ifdef SERIAL_DEBUG
@@ -1906,6 +1907,7 @@ static void bms_handle_fault(void)
 #endif
 
   sw_timer_start(&fault_timer);
+  sw_timer_start(&giveup_timer);
 
   leds_off();
   dsn_prot_set_trigger(false);
@@ -1981,6 +1983,21 @@ static void bms_handle_fault(void)
        * flat pack for days is exactly what the timeout exists to prevent.
        * Pulling the trigger shows the code again.
        */
+      /*
+       * Docked and still faulting after all this time. The re-check below is
+       * the cure for a flat pack, but only if charging can actually happen -
+       * and if it cannot, running the MCU and the AFE from the cells is what
+       * empties them. See FAULT_CHARGER_GIVEUP_MS.
+       */
+      if (sw_timer_is_elapsed(&giveup_timer, FAULT_CHARGER_GIVEUP_MS))
+      {
+        BMS_PRINT("BMS:FAULT giving up on charger after %lu min, sleeping\r\n",
+                  (unsigned long)(FAULT_CHARGER_GIVEUP_MS / 60000ul));
+        leds_off();
+        bms_state = BMS_SLEEP;
+        return;
+      }
+
       if (retry_due)
       {
         sw_timer_start(&retry_timer);
@@ -2335,6 +2352,37 @@ static void bms_handle_charging(void)
      }
      else if (sw_timer_is_elapsed(&noflow_timeout, CHARGE_NO_CURRENT_TIMEOUT_MS))
      {
+       /*
+        * Not every stalled current is a fault. A charger in its constant
+        * voltage phase tapers to nothing by design, and on a pack that is
+        * nearly full that taper can outlast the timeout - shutting down there
+        * would abandon the last few percent of a charge that is working
+        * perfectly.
+        *
+        * The hazard this guards against is a pack that cannot fill, sitting on
+        * a dock burning what it has left. A pack already at the release
+        * threshold has nothing left to lose, so above it, keep waiting.
+        *
+        * Checked only once the timeout has expired, so the cell read costs
+        * nothing in the normal case.
+        */
+       uint16_t *v_now   = bq7693_get_cell_voltages();
+       uint16_t  v_max   = 0;
+
+       for (int i = 0; i < 7; ++i)
+       {
+         if (v_now[i] > v_max)
+         {
+           v_max = v_now[i];
+         }
+       }
+
+       if (v_max >= CELL_FULL_CHARGE_RELEASE_VOLTAGE)
+       {
+         sw_timer_start(&noflow_timeout);
+         continue;
+       }
+
        port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
        bq7693_disable_charge();
        bms_balance_stop();

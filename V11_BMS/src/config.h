@@ -161,21 +161,19 @@
 // to empty a pack. On a dock that has genuinely failed, the pack sleeps
 // instead of draining, and retries when it is next docked.
 #define CHARGE_NO_CURRENT_TIMEOUT_MS        (5 * 60 * 1000ul)
-// Give up and shut the pack down after this long with the charge commanded and
-// nothing flowing.
+
+// Longest a pack will sit in the fault state with a charger attached before
+// shutting down.
 //
-// This is the failure that destroyed the cells this firmware was first run on.
-// A fuse in the charge path had blown, so the pack could not take charge - but
-// it could still see a charger, so it sat on the dock indefinitely, running
-// the MCU and the AFE from the cells it was trying to fill, until every one of
-// them was at zero. Nothing in the firmware ever asked whether the charging it
-// was performing was achieving anything.
+// The fault handler deliberately keeps re-checking while docked, because
+// charging IS the cure for a flat pack and giving up would strand one that
+// could recover. But if the charge path is broken the cure never arrives, and
+// the re-checking itself is what finishes the cells off - the same way the
+// pack this firmware was first run on reached zero.
 //
-// Five minutes is far beyond any legitimate delay - the current supervision
-// itself settles in CHARGE_CURRENT_GRACE_MS - and far below the days it takes
-// to empty a pack. On a dock that has genuinely failed, the pack sleeps
-// instead of draining, and retries when it is next docked.
-#define CHARGE_NO_CURRENT_TIMEOUT_MS        (5 * 60 * 1000ul)
+// Half an hour is 360 attempts at FAULT_RETRY_MS. A charge that has not
+// started by then is not going to, and re-docking retries it anyway.
+#define FAULT_CHARGER_GIVEUP_MS             (30 * 60 * 1000ul)
 
 // How often to log the cell voltages while charging or running the motor.
 // Both states also log them on entry and on exit, so this only has to cover
