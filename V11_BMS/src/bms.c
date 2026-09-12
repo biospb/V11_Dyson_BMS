@@ -873,6 +873,12 @@ static bool bms_trigger_active(void)
 
   uint8_t level = dio_read(DIO_TRIGGER_PRESSED);
 
+  /* See mode 2 below - a latch outlives the session that justified it. */
+  if (!dsn_prot_get_vacuum_connected())
+  {
+    latched = false;
+  }
+
   if (level && !prev_level) // rising edge
   {
     latched = !latched;
@@ -909,6 +915,20 @@ static bool bms_trigger_active(void)
   static sw_timer held_timer = 0;
 
   uint8_t level = dio_read(DIO_TRIGGER_PRESSED);
+
+  /*
+   * A latch only means anything while there is a cleaner listening. Sessions
+   * do not always end with the trigger being released - PROT:MS_WDT ends one
+   * when the cleaner simply stops talking - and a latch left set through that
+   * is reported as a held trigger for ever after. The pack then bounces
+   * between idle and running every time the cleaner announces itself, never
+   * notices a charger being docked because the running state does not look
+   * for one, and starts the motor unasked the moment a cleaner reconnects.
+   */
+  if (!dsn_prot_get_vacuum_connected())
+  {
+    latched = false;
+  }
 
   if (level && !prev_level)          /* pressed */
   {
