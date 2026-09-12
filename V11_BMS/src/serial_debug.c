@@ -148,7 +148,7 @@ void serial_debug_process(void)
 /**
  * @brief Queue individual cell voltages and the pack voltage.
  *
- * Output format: "V: <c0> <c1> … <c6> P: <pack>\r\n"
+ * Output format: "V: <c0> <c1> … <c6> mV P: <pack> mV\r\n"
  */
 void serial_debug_send_cell_voltages(void)
 {
@@ -156,15 +156,15 @@ void serial_debug_send_cell_voltages(void)
   char tmp[30];
   uint16_t *cell_voltages = bq7693_get_cell_voltages();
 
-  serial_debug_send_message("mV:");
+  serial_debug_send_message("V:");
 
   for (int i=0; i<7; ++i)
   {
-    DEBUG_SNPRINTF(tmp, sizeof(tmp), " %d ", cell_voltages[i]);
+    DEBUG_SNPRINTF(tmp, sizeof(tmp), " %d", cell_voltages[i]);
     serial_debug_send_message(tmp);
   }
 
-  DEBUG_SNPRINTF(tmp, sizeof(tmp), "P: %d mV\r\n", bq7693_get_pack_voltage());
+  DEBUG_SNPRINTF(tmp, sizeof(tmp), " mV P: %d mV\r\n", bq7693_get_pack_voltage());
   serial_debug_send_message(tmp);
 #endif
 }
