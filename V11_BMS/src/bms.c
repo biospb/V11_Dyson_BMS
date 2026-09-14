@@ -1839,9 +1839,18 @@ static void bms_handle_vacuum_running(void)
     return;
   }
 
-  //An absorbed AFE transient has taken DSG_ON away - put it back before
-  //telling the cleaner it may run.
-  if (bms_afe_fet_dropped() && !bms_discharge_fet_on())
+  /*
+   * Arm discharge unconditionally before telling the cleaner it may run.
+   *
+   * This used to happen only after an absorbed AFE event. The normal arming is
+   * done in bms_handle_idle() when the cleaner connects, and if that single
+   * attempt failed it retries every IDLE_DSG_RETRY_MS - but a trigger pulled
+   * inside that window came straight here with DSG still off. The cleaner was
+   * told to run, the motor had no supply, and nothing re-armed it until the
+   * session ended. bq7693_enable_discharge() is idempotent, so doing it on
+   * every entry costs one register round trip and closes the window.
+   */
+  if (!bms_discharge_fet_on())
   {
     dsn_prot_set_trigger(false);
     bms_set_error(BMS_ERR_I2C_FAIL);
@@ -2097,6 +2106,11 @@ static void bms_handle_fault(void)
 
     if (trigger_now && !trigger_state)
     {
+      /* Every other exit clears the code; this one left it set on the way to
+         idle. Harmless today - the next safety check starts from NONE - but
+         bms_set_error() only raises, so a stale high code is a trap for any
+         later path that sets a lower one before that check runs. */
+      bms_error = BMS_ERR_NONE;
       leds_off();
       bms_state = BMS_IDLE;
       return;
@@ -2517,24 +2531,35 @@ static void bms_handle_charging(void)
          }
        }
 
-       if (v_max >= CELL_FULL_CHARGE_RELEASE_VOLTAGE)
+       /*
+        * The release threshold in force, not the full-charge one: a stored pack
+        * finishes at CELL_STORAGE_CHARGE_VOLTAGE, far below the full release
+        * level, so comparing against that would never recognise its taper.
+        */
+       const uint16_t v_release = bms_in_storage_mode() ? CELL_STORAGE_RELEASE_VOLTAGE
+                                                        : CELL_FULL_CHARGE_RELEASE_VOLTAGE;
+
+       if (v_max >= v_release)
        {
+         /* Nearly there - keep waiting. No continue: that skipped the safety
+            checks and the loop delay below for the pass. */
          sw_timer_start(&noflow_timeout);
-         continue;
        }
+       else
+       {
+         port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+         bq7693_disable_charge();
+         bms_balance_stop();
+         leds_off();
 
-       port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-       bq7693_disable_charge();
-       bms_balance_stop();
-       leds_off();
-
-       serial_debug_send_message("BMS:CHARGE_NO_CURRENT timeout, shutting down\r\n");
+         serial_debug_send_message("BMS:CHARGE_NO_CURRENT timeout, shutting down\r\n");
 #ifdef SERIAL_DEBUG
-       serial_debug_send_cell_voltages();
-       bms_debug_dump_pins("no_current");
+         serial_debug_send_cell_voltages();
+         bms_debug_dump_pins("no_current");
 #endif
-       bms_state = BMS_SLEEP;
-       return;
+         bms_state = BMS_SLEEP;
+         return;
+       }
      }
 
      if (current_flowing != current_flowing_prev)
