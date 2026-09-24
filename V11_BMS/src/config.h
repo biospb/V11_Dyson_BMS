@@ -100,7 +100,14 @@
 
 //18650 cell temperature limits from Molicell datasheet.
 #define MAX_PACK_TEMPERATURE                60       //'C - if pack temperature greater than this, no charge/discharge allowed.
-#define MAX_PACK_CHARGE_TEMP                40       //'C - if pack temperature greater than this, no charge allowed.
+// Charge temperature window, with hysteresis. A charge only STARTS (or resumes
+// from a fault) below MAX_PACK_CHARGE_START_TEMP, and one already running is
+// only stopped at MAX_PACK_CHARGE_TEMP. With a single limit the pack chattered
+// between charging and faulting a tenth of a degree either side of it, and
+// every fault entry could rewrite the EEPROM. Both are compared against the
+// hotter of the two thermistors.
+#define MAX_PACK_CHARGE_START_TEMP          40       //'C - no charge starts at or above this
+#define MAX_PACK_CHARGE_TEMP                45       //'C - a running charge stops at or above this
 #define MIN_PACK_CHARGE_TEMP                0        //'C - if less than this, no charge.
 #define MIN_PACK_DISCHARGE_TEMP             -10      //'C - if less than this, no discharge
 // Limits disabled, as V15 & V11 have 2xRTDs, now unknown where are assigned, therefore even max temp doesnt work
@@ -332,10 +339,9 @@
 #define CELL_BALANCE_OV_GUARD_MV            4200    //mV
 
 // Balancing burns the imbalance off as heat inside the pack and runs unattended
-// for hours on the dock, so it honours the charge temperature ceiling as well.
-// Tracks MAX_PACK_CHARGE_TEMP by default; lower it if you want balancing to
-// back off earlier than charging does.
-#define CELL_BALANCE_MAX_TEMP               MAX_PACK_CHARGE_TEMP   //'C
+// for hours on the dock, so it honours the charge temperature ceiling as well -
+// the lower, start-of-charge one, since it is not a charge in progress.
+#define CELL_BALANCE_MAX_TEMP               MAX_PACK_CHARGE_START_TEMP   //'C
 
 // How many AFE-reported internal faults (DEVICE_XREADY) or external ALERT
 // overrides (OVRD_ALERT) to absorb before faulting the pack.

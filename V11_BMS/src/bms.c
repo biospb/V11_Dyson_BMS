@@ -1479,11 +1479,15 @@ static bool bms_is_safe_to_charge(void)
   bms_sample_temperatures();
   int temp     = pack_temperature / 10;
   int temp_hot = bms_temperature_hottest() / 10;
+  /* Hysteresis: a running charge may go on to MAX_PACK_CHARGE_TEMP, anything
+     else - starting, resuming from a fault - needs the lower limit. */
+  const int max_hot = (bms_state == BMS_CHARGING) ? MAX_PACK_CHARGE_TEMP
+                                                  : MAX_PACK_CHARGE_START_TEMP;
 
-  if (temp_hot >= MAX_PACK_CHARGE_TEMP || temp_hot >= MAX_PACK_TEMPERATURE)
+  if (temp_hot >= max_hot || temp_hot >= MAX_PACK_TEMPERATURE)
   {
     bms_set_error(BMS_ERR_PACK_OVERTEMP);
-    BMS_PRINT("%s: Pack overtemp %d 'C, max %d\r\n", __FUNCTION__, temp_hot, MAX_PACK_CHARGE_TEMP);
+    BMS_PRINT("%s: Pack overtemp %d 'C, max %d\r\n", __FUNCTION__, temp_hot, max_hot);
   }
   else if (temp < MIN_PACK_CHARGE_TEMP)
   {
@@ -2037,7 +2041,7 @@ static void bms_handle_fault(void)
        * Hand over to charging only once the pack is actually chargeable.
        * Going straight to BMS_CHARGER_CONNECTED bounced back here on its
        * safety check for anything the charge path rejects - a pack between
-       * MAX_PACK_CHARGE_TEMP and MAX_PACK_TEMPERATURE, a dead bus, a broken
+       * MAX_PACK_CHARGE_START_TEMP and MAX_PACK_TEMPERATURE, a dead bus, a broken
        * cell tap - once per blink cycle, each time re-entering this state
        * with the FET disables and the EEPROM compare.
        *
