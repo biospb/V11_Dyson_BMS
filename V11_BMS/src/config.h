@@ -260,6 +260,8 @@
 #define EEPROM_CHARGE_TOLERANCE_UAH         (10 * 1000ul)   // 10mAh
 
 
+// Both are tested with #ifdef / defined(), so the VALUE is ignored: setting
+// either to 0 changes nothing. Comment the line out to turn it off.
 #define SERIAL_DEBUG                        1 //Serial debug via the spare USART on the programming pins header
 #define PROT_DEBUG_PRINT                    1
 

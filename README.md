@@ -48,7 +48,7 @@ The firmware implements the Dyson serial protocol with TLV-based communication.
 
 | Define | Default | Purpose |
 |--------|---------|---------|
-| `TRIGGER_TOGGLE_MODE` | `0` | Trigger behaviour. `0` = momentary (hold to run, the V11/V15 behaviour). `1` = toggle (each press flips run/stop; hold for ≥1 s to force stop). Set to `1` for the Dyson V12, whose trigger is a click-to-latch button rather than a held switch. |
+| `TRIGGER_TOGGLE_MODE` | `2` | Trigger behaviour. `0` = momentary (hold to run, the V11/V15 behaviour). `1` = toggle (each press flips run/stop; hold past `TRIGGER_HOLD_MS` to force stop). `2` = hybrid, see [Trigger](#trigger). Set to `1` for the Dyson V12, whose trigger is a click-to-latch button rather than a held switch. |
 
 ## Build Toolchain
 
@@ -183,6 +183,33 @@ state.
 Which kind of press it was can only be known on release, so the motor responds
 to the press itself either way and only the ending differs.
 
+A latch (modes 1 and 2) is dropped, stopping the motor, when:
+
+- the cleaner stops talking to the pack;
+- a charger appears - the cleaner is being docked, and charging starts;
+- any fault occurs, so the motor does not restart by itself once the fault
+  clears;
+- it has held the motor on for `TRIGGER_LATCH_MAX_MS` (30 minutes). A trigger
+  physically held at that moment keeps the motor running.
+
+## Charging Temperature
+
+A charge starts, or resumes after a fault, only while the hotter of the two
+thermistors is below `MAX_PACK_CHARGE_START_TEMP` (40 C). Once running it is
+stopped at `MAX_PACK_CHARGE_TEMP` (45 C). The 5 C gap stops a warm pack
+toggling between charging and faulting. Charging below `MIN_PACK_CHARGE_TEMP`
+(0 C) is refused.
+
+## Storage Mode
+
+A docked pack whose motor has not run for `STORAGE_IDLE_WAKES` standby periods
+(two days each, so about two weeks) is treated as stored: it tops up only
+after drifting below `CELL_STORAGE_RELEASE_VOLTAGE` and then only to
+`CELL_STORAGE_CHARGE_VOLTAGE`, instead of the full-charge pair. Nothing is
+discharged to get there. This also applies to a cleaner left on its wall dock,
+because the cleaner's sleep request ends the session the count looks at. The
+first run of the motor clears it, and the next charge goes to full.
+
 ## Fault Codes
 
 When the BMS faults, both LEDs blink a pattern, pause, and repeat. **The
@@ -219,18 +246,26 @@ A watchdog fault only appears if the firmware stalled for between 0.5 and 1.0
 seconds and then recovered. A stall past 1.0 seconds resets the MCU outright,
 so a genuine hang shows up as the pack restarting, not as a blink pattern.
 
-Off the charger, the fault display gives up after `FAULT_DISPLAY_TIME`
-(5 minutes) and the pack shuts down, so a flat pack does not sit blinking
-itself further into the ground. Pulling the trigger leaves the fault state
-immediately.
+The blinking stops after `FAULT_DISPLAY_TIME` (5 minutes) - the LEDs run from
+the cells - but the re-checking carries on. Pulling the trigger leaves the
+fault state immediately and shows the code again if it is still there.
 
-On the charger the pack does not shut down. It re-checks every
-`FAULT_RETRY_MS` (5 seconds) whether it is safe to charge, and starts charging
-as soon as it is. That is how a flat pack recovers, and it is why a pack that
-is too hot to charge shows the "too hot" pattern on the dock until it has
-cooled. The blinking still stops after `FAULT_DISPLAY_TIME` - the LEDs run
-from the cells while the charge FET is off - but the re-check continues.
-Pull the trigger to see the code again.
+On the charger the pack re-checks every `FAULT_RETRY_MS` (5 seconds) whether
+it is safe to charge, and starts charging as soon as it is. That is how a flat
+pack recovers, and it is why a pack that is too hot to charge shows the "too
+hot" pattern on the dock until it has cooled.
+
+When the pack gives up and shuts down (SHIP mode - press the button or re-dock
+to wake it):
+
+| Fault | Off the charger | On the charger |
+|-------|-----------------|----------------|
+| Short flashes (clears itself) | `FAULT_RECOVER_GIVEUP_MS` (2 h) | `FAULT_RECOVER_GIVEUP_MS` (2 h) |
+| Long flashes (needs attention) | `FAULT_DISPLAY_TIME` (5 min) | `FAULT_CHARGER_GIVEUP_MS` (30 min) |
+
+The long flashes shut down sooner because a flat pack must not sit awake
+draining itself further, and a charge that has not started in half an hour
+is not going to.
 
 ## License
 
