@@ -2485,8 +2485,12 @@ static void bms_handle_charging(void)
 
      if (sw_timer_is_elapsed(&charge_flow_timer, CHARGE_CURRENT_GRACE_MS))
      {
-       int32_t current_abs_mA = (current_filt_mA < 0) ? -current_filt_mA : current_filt_mA;
-       current_flowing = (current_abs_mA >= CHARGE_CURRENT_MIN_MA);
+       /* Signed, not abs(): charge current is positive (it is what raises
+          current_charge_level). A docked cleaner drawing from the pack while
+          the charger delivers nothing reads negative, and abs() counted that
+          drain as a working charge - hiding the very failure the no-current
+          shutdown below exists for. */
+       current_flowing = (current_filt_mA >= CHARGE_CURRENT_MIN_MA);
      }
 
 #ifdef SERIAL_DEBUG
