@@ -1562,7 +1562,19 @@ static bool bms_is_safe_to_charge(void)
   {
     bms_set_error(BMS_ERR_OVERVOLTAGE);
   }
-  if (bms_afe_fault_is_real(sys_stat, __FUNCTION__))
+  /*
+   * OVRD_ALERT is not absorbed on the charge path. The tolerance exists for
+   * motor noise on ALERT, and there is no motor running here - whereas an
+   * external driver of ALERT is, by the datasheet's own example, a secondary
+   * overvoltage protector, and absorbing it would switch the charge FET
+   * straight back on (bms_afe_fet_dropped()) into the cell it tripped on.
+   */
+  if (sys_stat & STAT_OVRD_ALERT)
+  {
+    bms_set_error(BMS_ERR_I2C_FAIL);
+    BMS_PRINT("%s: ALERT override\r\n", __FUNCTION__);
+  }
+  else if (bms_afe_fault_is_real(sys_stat, __FUNCTION__))
   {
     bms_set_error(BMS_ERR_I2C_FAIL);
   }
