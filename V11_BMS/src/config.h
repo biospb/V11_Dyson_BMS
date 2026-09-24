@@ -286,6 +286,11 @@
 #define TRIGGER_TOGGLE_MODE                 2
 // How long a press has to last to count as "held" rather than "tapped".
 #define TRIGGER_HOLD_MS                     400
+// Longest the motor runs on a latch (modes 1 and 2) before it is dropped, so a
+// cleaner put down with the motor latched on does not run the pack flat. A
+// trigger physically held at that moment keeps the motor running. The latch
+// is also dropped by any fault and by a charger appearing.
+#define TRIGGER_LATCH_MAX_MS                (30 * 60 * 1000ul)
 
 //-----------------------------------------------------------------------------
 // Passive cell balancing (BQ7693 internal balance FETs)

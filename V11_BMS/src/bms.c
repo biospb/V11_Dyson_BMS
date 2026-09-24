@@ -863,35 +863,86 @@ static void bms_set_error(enum BMS_ERROR_CODE code)
     bms_error = code;
 }
 
+#if (TRIGGER_TOGGLE_MODE != 0)
+/*
+ * The latch behind TRIGGER_TOGGLE_MODE 1 and 2. File scope so that the states
+ * which must drop it - a fault, a charger - can, see bms_trigger_latch_clear().
+ */
+static bool     bms_trigger_latched     = false;
+static sw_timer bms_trigger_latch_timer = 0;
+
+/** @brief Set or clear the latch, starting TRIGGER_LATCH_MAX_MS as it is set. */
+static void bms_trigger_latch_set(bool on)
+{
+  if (on && !bms_trigger_latched)
+  {
+    sw_timer_start(&bms_trigger_latch_timer);
+  }
+  bms_trigger_latched = on;
+}
+
+/** @brief Drop the latch, so nothing restarts the motor without a new press. */
+static void bms_trigger_latch_clear(void)
+{
+  bms_trigger_latched = false;
+}
+
+/**
+ * @brief Drop the latch wherever it no longer means anything.
+ *
+ * A latch only means anything while there is a cleaner listening. Sessions do
+ * not always end with the trigger being released - PROT:MS_WDT ends one when
+ * the cleaner simply stops talking - and a latch left set through that is
+ * reported as a held trigger for ever after. The pack then bounces between
+ * idle and running every time the cleaner announces itself, and starts the
+ * motor unasked the moment a cleaner reconnects.
+ *
+ * It also goes when a charger appears - the cleaner is being docked, and a
+ * motor that keeps running there never lets the charge start - and after
+ * TRIGGER_LATCH_MAX_MS of running on it, so a cleaner put down with the motor
+ * latched on does not run until the pack is flat.
+ */
+static void bms_trigger_latch_expire(void)
+{
+  if (!dsn_prot_get_vacuum_connected() || dio_read(DIO_CHARGER_CONNECTED))
+  {
+    bms_trigger_latched = false;
+  }
+  else if (bms_trigger_latched
+           && sw_timer_is_elapsed(&bms_trigger_latch_timer, TRIGGER_LATCH_MAX_MS))
+  {
+    bms_trigger_latched = false;
+    BMS_PRINT("BMS:TRIGGER_LATCH timeout\r\n");
+  }
+}
+#else
+#define bms_trigger_latch_clear()  do { } while (0)
+#endif
+
 /**  @brief Trigger state */
 static bool bms_trigger_active(void)
 {
 #if (TRIGGER_TOGGLE_MODE == 1)
-  static bool     latched    = false;
   static uint8_t  prev_level = 0;
   static sw_timer held_timer = 0;
 
   uint8_t level = dio_read(DIO_TRIGGER_PRESSED);
 
-  /* See mode 2 below - a latch outlives the session that justified it. */
-  if (!dsn_prot_get_vacuum_connected())
-  {
-    latched = false;
-  }
+  bms_trigger_latch_expire();
 
   if (level && !prev_level) // rising edge
   {
-    latched = !latched;
+    bms_trigger_latch_set(!bms_trigger_latched);
     sw_timer_start(&held_timer);
   }
   else if (level && prev_level)
   {
-    if (latched && sw_timer_is_elapsed(&held_timer, TRIGGER_HOLD_MS))
-      latched = false;
+    if (bms_trigger_latched && sw_timer_is_elapsed(&held_timer, TRIGGER_HOLD_MS))
+      bms_trigger_latch_set(false);
   }
   prev_level = level;
 
-  return latched;
+  return bms_trigger_latched;
 
 #elif (TRIGGER_TOGGLE_MODE == 2)
   /*
@@ -909,26 +960,13 @@ static bool bms_trigger_active(void)
    *                 press the way out of a latch that was set by accident -
    *                 the same gesture whether or not you remember the state.
    */
-  static bool     latched    = false;
   static bool     was_long   = false;
   static uint8_t  prev_level = 0;
   static sw_timer held_timer = 0;
 
   uint8_t level = dio_read(DIO_TRIGGER_PRESSED);
 
-  /*
-   * A latch only means anything while there is a cleaner listening. Sessions
-   * do not always end with the trigger being released - PROT:MS_WDT ends one
-   * when the cleaner simply stops talking - and a latch left set through that
-   * is reported as a held trigger for ever after. The pack then bounces
-   * between idle and running every time the cleaner announces itself, never
-   * notices a charger being docked because the running state does not look
-   * for one, and starts the motor unasked the moment a cleaner reconnects.
-   */
-  if (!dsn_prot_get_vacuum_connected())
-  {
-    latched = false;
-  }
+  bms_trigger_latch_expire();
 
   if (level && !prev_level)          /* pressed */
   {
@@ -937,7 +975,7 @@ static bool bms_trigger_active(void)
   }
   else if (!level && prev_level)     /* released */
   {
-    latched = was_long ? false : !latched;
+    bms_trigger_latch_set(was_long ? false : !bms_trigger_latched);
   }
   else if (level)                    /* still held */
   {
@@ -948,7 +986,7 @@ static bool bms_trigger_active(void)
   }
   prev_level = level;
 
-  return (latched || (level != 0u));
+  return (bms_trigger_latched || (level != 0u));
 
 #else
   return dio_read(DIO_TRIGGER_PRESSED);
@@ -1924,7 +1962,12 @@ static void bms_handle_vacuum_running(void)
       return;
     }
 
-    if (!bms_trigger_active() || !dsn_prot_get_vacuum_connected())
+    /* A charger means the cleaner is being docked: stop, and let idle hand
+       over to BMS_CHARGER_CONNECTED. Nothing here looked for one, so a motor
+       left running on a latch kept running on the dock and the charge never
+       started. */
+    if (!bms_trigger_active() || !dsn_prot_get_vacuum_connected()
+        || dio_read(DIO_CHARGER_CONNECTED))
     {
       dsn_prot_set_trigger(false);
       leds_off();
@@ -1986,6 +2029,10 @@ static void bms_handle_fault(void)
 
   leds_off();
   dsn_prot_set_trigger(false);
+  /* A latched trigger must not survive a fault: once a self-recovering fault
+     clears, idle would read the latch as a held trigger and restart the motor
+     on its own. */
+  bms_trigger_latch_clear();
   bq7693_disable_discharge();
   bq7693_disable_charge();
   bms_balance_stop();
