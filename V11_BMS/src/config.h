@@ -208,6 +208,15 @@
 // started by then is not going to, and re-docking retries it anyway.
 #define FAULT_CHARGER_GIVEUP_MS             (30 * 60 * 1000ul)
 
+// The self-recovering faults - temperature, AFE overcurrent / short circuit -
+// get much longer, on and off the charger, instead of FAULT_CHARGER_GIVEUP_MS
+// and FAULT_DISPLAY_TIME. They clear on their own: a pack docked hot straight
+// after a boost run can take well over half an hour to come back under
+// MAX_PACK_CHARGE_START_TEMP, and shutting it down first meant a cleaner found
+// uncharged in the morning. The LEDs still go quiet after FAULT_DISPLAY_TIME;
+// only the re-checking carries on, which costs a few mA.
+#define FAULT_RECOVER_GIVEUP_MS             (2 * 60 * 60 * 1000ul)
+
 // How often to log the cell voltages while charging or running the motor.
 // Both states also log them on entry and on exit, so this only has to cover
 // what happens in between - drift under a long charge, sag under a long run.

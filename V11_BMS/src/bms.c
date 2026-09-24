@@ -2064,10 +2064,10 @@ static void bms_handle_fault(void)
        * and if it cannot, running the MCU and the AFE from the cells is what
        * empties them. See FAULT_CHARGER_GIVEUP_MS.
        */
-      if (sw_timer_is_elapsed(&giveup_timer, FAULT_CHARGER_GIVEUP_MS))
+      if (sw_timer_is_elapsed(&giveup_timer, auto_recover ? FAULT_RECOVER_GIVEUP_MS
+                                                          : FAULT_CHARGER_GIVEUP_MS))
       {
-        BMS_PRINT("BMS:FAULT giving up on charger after %lu min, sleeping\r\n",
-                  (unsigned long)(FAULT_CHARGER_GIVEUP_MS / 60000ul));
+        BMS_PRINT("BMS:FAULT giving up on charger, sleeping\r\n");
         leds_off();
         bms_state = BMS_SLEEP;
         return;
@@ -2096,14 +2096,17 @@ static void bms_handle_fault(void)
            least the original code - a worse finding is shown, not hidden */
       }
     }
-    else if (display_over)
+    else if (auto_recover ? sw_timer_is_elapsed(&giveup_timer, FAULT_RECOVER_GIVEUP_MS)
+                          : display_over)
     {
       /* The user has had long enough to read the code. Shut the pack down
          rather than blinking forever - which on a flat pack means draining
          it further - and let bms_handle_sleep() commit the charge level.
          Off the charger only: on the dock the display stops but the
-         re-check above carries on, see there. */
-      BMS_PRINT("BMS:FAULT display timeout, sleeping\r\n");
+         re-check above carries on, see there. A self-recovering fault keeps
+         retrying, dark, for FAULT_RECOVER_GIVEUP_MS first - an overheated
+         pack cooling down should come back by itself, not need waking. */
+      BMS_PRINT("BMS:FAULT timeout, sleeping\r\n");
       bms_state = BMS_SLEEP;
       return;
     }
