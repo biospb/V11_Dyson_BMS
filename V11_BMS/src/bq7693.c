@@ -495,6 +495,21 @@ void bq7693_disable_discharge(void)
 }
 
 /**
+ * @brief Convert a raw 14-bit VC reading to mV, floored at 0.
+ *
+ * ADCOFFSET is signed. With a negative offset a raw reading of zero - a
+ * severed sense wire, a shorted channel - came out as a small negative number,
+ * which the uint16_t result wrapped to ~65530mV: past the implausible-cell
+ * check, and read as a full or overvolted cell by everything downstream.
+ */
+static uint16_t bq7693_vc_to_mv(uint16_t raw)
+{
+  int32_t mv = ((int32_t)raw * bq7693_adc_gain) / 1000 + bq7693_adc_offset;
+
+  return (mv > 0) ? (uint16_t)mv : 0u;
+}
+
+/**
  * @brief Read all 7 cell voltages from BQ7693 and apply ADC calibration.
  *
  * @return  Pointer to static array of 7 cell voltages in mV.
@@ -519,7 +534,7 @@ uint16_t *bq7693_get_cell_voltages(void)
       continue;
     }
     tempval = ((scratch[0] & 0x3F) <<8) | scratch[1];
-    bq7693_cell_voltages[i] = tempval * bq7693_adc_gain/1000 + bq7693_adc_offset;
+    bq7693_cell_voltages[i] = bq7693_vc_to_mv(tempval);
   }
 
   return bq7693_cell_voltages;
@@ -554,7 +569,7 @@ void bq7693_get_all_vc(uint16_t *voltages_out)
       continue;
     }
     tempval = ((scratch[0] & 0x3F) << 8) | scratch[1];
-    voltages_out[i] = tempval * bq7693_adc_gain / 1000 + bq7693_adc_offset;
+    voltages_out[i] = bq7693_vc_to_mv(tempval);
   }
 }
 
