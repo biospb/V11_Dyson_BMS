@@ -1509,11 +1509,13 @@ static bool bms_is_safe_to_charge(void)
     /* was not checked on the charge path at all */
     bms_set_error(BMS_ERR_SHORTCIRCUIT);
   }
-  if (sys_stat & STAT_UV)
-  {
-    /* likewise - charging into a pack the AFE has declared undervolt */
-    bms_set_error(BMS_ERR_UNDERVOLTAGE);
-  }
+  /*
+   * STAT_UV is deliberately NOT a reason to refuse a charge. UV only drops
+   * DSG (SLUSBK2I Table 8-1), and the bit re-latches for as long as a cell sits
+   * under UV_TRIP - so refusing on it stranded exactly the pack that most needs
+   * charging: one that self-discharged below CELL_UNDERVOLTAGE_TRIP in storage.
+   * CELL_LOWEST_CHARGE_VOLTAGE above is the floor for charging.
+   */
   if (sys_stat & STAT_OV)
   {
     bms_set_error(BMS_ERR_OVERVOLTAGE);
