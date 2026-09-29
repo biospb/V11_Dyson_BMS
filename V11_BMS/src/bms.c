@@ -684,6 +684,8 @@ static sw_timer                bms_balance_led_timer = 0;
 static bq7693_balance_status_t bms_balance_status;
 static uint8_t                 bms_balance_last_mask  = 0;
 static bq7693_balance_state_t  bms_balance_last_state = BQ_BALANCE_IDLE;
+/* Bleeding is paused ahead of each decision - see CELL_BALANCE_SETTLE_MS. */
+static bool                    bms_balance_settling   = false;
 
 /** @brief Turn balancing off and re-arm the tick so the next call evaluates immediately. */
 static void bms_balance_stop(void)
@@ -693,6 +695,7 @@ static void bms_balance_stop(void)
   bms_balance_status.cell_mask = 0;
   bms_balance_last_mask    = 0;
   bms_balance_last_state   = BQ_BALANCE_IDLE;
+  bms_balance_settling     = false;
   sw_timer_stop(&bms_balance_timer);
 
   //Park the LEDs too - callers either redraw immediately (charging breathe,
@@ -713,8 +716,36 @@ static void bms_balance_stop(void)
  */
 static bool bms_balance_tick(void)
 {
-  if (!sw_timer_is_elapsed(&bms_balance_timer, CELL_BALANCE_PERIOD_MS))
-    return (bms_balance_status.state == BQ_BALANCE_ACTIVE);
+  const bool active = (bms_balance_status.state == BQ_BALANCE_ACTIVE);
+
+  /*
+   * A cell reads about 10mV high while it is being bled, measured on the
+   * pack: the readings taken with balancing on and just after it stopped
+   * differ by that much on the bled cells and not on the others. Deciding on
+   * those readings kept a cell bleeding ~10mV past where it should stop. So
+   * every decision is preceded by CELL_BALANCE_SETTLE_MS with the channels
+   * off - the hysteresis latch is kept, only the registers are cleared - and
+   * taken on the settled readings.
+   */
+  if (bms_balance_settling)
+  {
+    if (!sw_timer_is_elapsed(&bms_balance_timer, CELL_BALANCE_SETTLE_MS))
+      return active;
+    bms_balance_settling = false;
+  }
+  else
+  {
+    if (!sw_timer_is_elapsed(&bms_balance_timer, CELL_BALANCE_PERIOD_MS))
+      return active;
+
+    if (bms_balance_status.cell_mask != 0u)
+    {
+      bq7693_set_balancing(0x00, 0x00);
+      bms_balance_settling = true;
+      sw_timer_start(&bms_balance_timer);
+      return active;
+    }
+  }
 
   sw_timer_start(&bms_balance_timer);
 

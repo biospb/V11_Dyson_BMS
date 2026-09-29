@@ -308,11 +308,12 @@
 #define CELL_BALANCE_ENABLE                 1
 
 // Start bleeding a cell once it is this far above the lowest cell...
-#define CELL_BALANCE_START_MV               30      //mV
+#define CELL_BALANCE_START_MV               25      //mV
 // ...and stop that cell once it is back within this of the lowest (hysteresis).
-#define CELL_BALANCE_STOP_MV                20      //mV
-// Whole pack is considered balanced once max-min drops below this.
-#define CELL_BALANCE_TARGET_SPREAD_MV       25      //mV
+#define CELL_BALANCE_STOP_MV                15      //mV
+// Whole pack is considered balanced once max-min is at or below this. Must
+// stay below START, or spreads between the two are never acted on.
+#define CELL_BALANCE_TARGET_SPREAD_MV       20      //mV
 
 /*
  * All three MUST stay above the AFE's inter-group measurement offset.
@@ -333,9 +334,13 @@
  *   STOP below   - a cell in the high group can never satisfy its own stop
  *                  condition, and only the pack-wide TARGET ends its bleed.
  *
- * STOP and TARGET were 10 and 15 and sat under that floor. The cost of raising
- * them is that a pack is called balanced with about 12mV of real spread left,
- * which is nothing next to the hundreds that make balancing worth doing.
+ * STOP and TARGET were 10 and 15 and sat under that floor, then 20 and 25 with
+ * START at 30. They are now 15/20/25: the decisions are taken on settled
+ * readings (CELL_BALANCE_SETTLE_MS), which removed a ~10mV error of the
+ * balancer's own making, and on the second pack the channels agreed with a
+ * meter to within ~11mV. That leaves STOP 2mV and TARGET 7mV above the 13mV
+ * step of the first pack - tight, and the first thing to revisit if that pack
+ * never reports BAL_DONE.
  *
  * Do not lower these to "make balancing testable" on a healthy pack. It will
  * balance, and it will be wrong.
@@ -380,7 +385,12 @@
 #define BQ_AFE_FAULT_DECAY_MS               (10 * 60 * 1000ul)
 
 // How often the balancing decision is re-evaluated.
-#define CELL_BALANCE_PERIOD_MS              2000
+#define CELL_BALANCE_PERIOD_MS              10000
+// Bleeding is switched off this long before each decision. A cell reads about
+// 10mV high while its channel is bleeding, so deciding on live readings kept
+// cells bleeding past their stop point. Costs ~10% of the bleed time at the
+// period above.
+#define CELL_BALANCE_SETTLE_MS              1000
 
 // Let cells relax this long after the charge FET opens before trusting the
 // measured spread - under charge, IR drop and surface charge dominate it.
