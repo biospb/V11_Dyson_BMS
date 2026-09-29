@@ -167,12 +167,33 @@ Alternatively, open `V11_BMS.atsln` in Microchip/Atmel Studio 7.
 
 ### Flashing
 
-Requires either : 
+Requires one of:
 
 - J-Link debug probe connected via SWD. OpenOCD configuration is in `openocd_samd20.cfg`.
 - Atmel ICE programmer via SWD.  OpenOCD configuration is in `openocd_samd20_ice.cfg`.
+- A CMSIS-DAP probe such as a DAPLink, with the prebuilt Windows OpenOCD package
+  `daplink-openocd-samd-coldplug-win64.zip` from the releases - see below.
 
-(Update the CMakeLists.txt to point to the correct configuration flie for your programmer)
+(Update the CMakeLists.txt to point to the correct configuration file for your programmer)
+
+#### With a DAPLink / CMSIS-DAP probe
+
+A pack still running the original Dyson firmware has the SAMD20's security bit
+set, and a stock OpenOCD cannot attach to it at all. The release package
+carries an OpenOCD built with `cmsis_dap_init_samd_cold_plug`, which attaches
+to a secured SAMD and chip-erases it, plus ready-made scripts:
+
+1. Wire SWDIO, SWCLK, GND **and nRESET** - the cold-plug sequence works through
+   the reset line, and the probe must actually drive it (not every DAPLink
+   does). Wake the pack with the mode button or the charger.
+2. `check.cmd` - attach and list the target.
+3. `erase.cmd` - once per pack: unlocks it by erasing everything, including the
+   original firmware, which cannot be restored.
+4. Copy `samd20_firmware.elf` from the firmware release into `bin`, run
+   `flash_fw.cmd`.
+5. Unplug the probe - see [Sleep and Wake](#sleep-and-wake) for why.
+
+The package's own README has the details and the OpenOCD patch.
 
 ## Initial Battery Calibration
 
