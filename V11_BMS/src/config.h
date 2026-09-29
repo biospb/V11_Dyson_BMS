@@ -57,7 +57,11 @@
 // the coulomb counter is allowed to learn, seeds the defaults, clamps the
 // runtime estimate, and is reported to the cleaner as the full-charge capacity.
 // Original Dyson V11 cells are 3600mAh; repacked cells are often larger.
-#define PACK_MAX_CAPACITY_MAH               4500
+//
+// It does not have to be exact. The gauge learns the real figure on the first
+// full discharge-to-charge cycle, anywhere from 30% to 120% of this - so 4000
+// covers anything from worn cells up to 4.8Ah ones.
+#define PACK_MAX_CAPACITY_MAH               4000
 #define CELL_LOWEST_DISCHARGE_VOLTAGE       2500  //mV - wont allow pack to discharge if any cells lower than this
 #define CELL_LOWEST_CHARGE_VOLTAGE          2000    //mV - won't try to charge the pack if any cells lower than this
 // Below this a cell reading is not a flat cell, it is a broken measurement -

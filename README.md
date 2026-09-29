@@ -2,7 +2,7 @@
 
 Aftermarket firmware for Dyson V11/V15 Battery Management Systems.
 
-Based on https://github.com/davidmpye/V10_Dyson_BMS
+Based on https://github.com/davidmpye/V10_Dyson_BMS and https://github.com/vladislav1983/V11_Dyson_BMS
 
 By using this project, you acknowledge and agree to the following:
 
@@ -47,8 +47,8 @@ IF YOU DO NOT FULLY UNDERSTAND THE RISKS OF LITHIUM BATTERIES, DO NOT USE THIS P
   top-up below 4080 mV, four 60 s settling pauses at the end of a charge.
 - **Readable fault codes.** Short flashes = clears itself, long flashes = needs
   attention, count = which fault. See [Fault Codes](#fault-codes).
-- **Fuel gauge.** Default capacity is now 4500 mAh (`PACK_MAX_CAPACITY_MAH` -
-  set it to your cells). The learned capacity can go up as well as down, is
+- **Fuel gauge.** Default capacity is now 4000 mAh (`PACK_MAX_CAPACITY_MAH`),
+  corrected by the first full cycle. The learned capacity can go up as well as down, is
   saved as soon as it is learned, and the displayed percentage no longer reads
   2.4% high.
 - **Mode button wakes the pack** from protocol sleep again, and a pack no longer
@@ -125,7 +125,7 @@ The firmware implements the Dyson serial protocol with TLV-based communication.
 | Define | Default | Purpose |
 |--------|---------|---------|
 | `TRIGGER_TOGGLE_MODE` | `2` | Trigger behaviour. `0` = momentary (hold to run, the V11/V15 behaviour). `1` = toggle (each press flips run/stop; hold past `TRIGGER_HOLD_MS` to force stop). `2` = hybrid, see [Trigger](#trigger). Set to `1` for the Dyson V12, whose trigger is a click-to-latch button rather than a held switch. |
-| `PACK_MAX_CAPACITY_MAH` | `4500` | Capacity of ONE fitted cell (the pack is 7S1P). Bounds what the gauge may learn (30%..120%), seeds the defaults, and is reported to the cleaner as the full-charge capacity. Original Dyson cells are 3600. |
+| `PACK_MAX_CAPACITY_MAH` | `4000` | Capacity of ONE fitted cell (the pack is 7S1P). Only a starting point - the first full cycle learns the real figure within 30%..120% of it (1200..4800 mAh at 4000). Also seeds the defaults and is reported to the cleaner as the full-charge capacity. Original Dyson cells are 3600. |
 | `CELL_BALANCE_ENABLE` | `1` | Passive cell balancing on the dock, see [Cell Balancing](#cell-balancing). `0` compiles it out. |
 | `SHIP_MODE_ENABLE` | `1` | `0` keeps the pack from ever entering SHIP mode - a bench setting, see [Sleep and Wake](#sleep-and-wake). |
 | `SERIAL_DEBUG`, `PROT_DEBUG_PRINT` | defined | Debug log, see [Debug Log](#debug-log). Tested with `#ifdef`: comment the line out to disable, setting it to `0` does nothing. |
