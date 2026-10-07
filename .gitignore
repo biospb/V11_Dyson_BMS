@@ -1,4 +1,3 @@
-
 .vs/V11_BMS/v14/.atsuo
 *.d
 *.o
@@ -11,4 +10,4 @@
 *.srec
 *.log
 V11_BMS/Release/
-V11_BMS/build_release/
+V11_BMS/build*

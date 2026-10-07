@@ -179,10 +179,46 @@ Alternatively, open `V11_BMS.atsln` in Microchip/Atmel Studio 7.
 
 ### Flashing
 
+#### Programming connections
+
+
+The programming header uses SWD. The marked pads are shown below.
+
+<p align='center'>
+  <img src='doc/flashing-header-pinout.png' width='480' alt='Dyson BMS programming header showing RST, SWDIO, SWCLK, GND, TX and 3.3 V pads'>
+</p>
+
+Programming-header image based on the original
+[V10_Dyson_BMS flashing documentation](https://github.com/davidmpye/V10_Dyson_BMS/wiki/Flashing).
+
+##### Required connections
+
+| Battery pad | Adapter signal | Notes |
+|-------------|----------------|-------|
+| `SWDIO` | SWDIO | Bidirectional data |
+| `SWCLK` | SWCLK | Clock |
+| `GND` | GND | A common ground is mandatory |
+| `RST` | RESET/nRESET | Recommended; may be required when recovering a protected device |
+| `3.3V` | VTref/VTG sense input only | Connect only when the adapter requires a target-voltage reference |
+
+> [!WARNING]
+> The battery generates its own 3.3 V rail after it is awakened. Do not connect
+> a programmer's 3.3 V power **output** to the battery's 3.3 V rail. J-Link
+> `VTref` and Atmel-ICE `VTG` are voltage-sense inputs and may be connected to
+> the battery's 3.3 V pad. Never connect the Raspberry Pi 3.3 V power pin.
+
+The programming pads and cell connections may remain electrically live while
+the case is open. Insulate tools and loose wires, and do not drill into a closed
+battery pack. Press the battery trigger immediately before connecting so that
+the BMS wakes and enables the MCU's 3.3 V supply. If detection fails, wake the
+pack again and retry at a lower SWD clock.
+
+
 Requires one of:
 
 - J-Link debug probe connected via SWD. OpenOCD configuration is in `openocd_samd20.cfg`.
 - Atmel ICE programmer via SWD.  OpenOCD configuration is in `openocd_samd20_ice.cfg`.
+- ST-Link via SWD with OpenOCD 0.12.0 or newer, using `openocd_samd20_stlink.cfg`.
 - A CMSIS-DAP probe such as a DAPLink, with the prebuilt Windows OpenOCD package
   `daplink-openocd-samd-coldplug-win64.zip` from the releases - see below.
 
@@ -206,6 +242,147 @@ to a secured SAMD and chip-erases it, plus ready-made scripts:
 5. Unplug the probe - see [Sleep and Wake](#sleep-and-wake) for why.
 
 The package's own README has the details and the OpenOCD patch.
+
+#### ST-Link with OpenOCD
+
+
+ST-LINK/V2, ST-LINK/V2-1, and STLINK-V3 probes can use the supplied
+`V11_BMS/openocd_samd20_stlink.cfg` configuration. This uses the probe only as
+an ARM SWD adapter; the target remains the Microchip ATSAMD20E15.
+
+Upstream reports successful programming and verification with this setup:
+
+| Component | Tested configuration |
+|-----------|----------------------|
+| Host | Windows / PowerShell |
+| Probe | ST-LINK/V2, firmware `V2J37S7`, API v2, USB `0483:3748` |
+| OpenOCD | xPack `0.12.0+dev-02228-ge5888bda3-dirty` (2025-10-04 build) |
+| Target | `SAMD20E15A`, 32 KB flash, 4 KB RAM |
+| SWD speed | 100 kHz |
+
+Use OpenOCD 0.12.0 or newer. On Windows, a prebuilt package is available from
+[xPack OpenOCD](https://github.com/xpack-dev-tools/openocd-xpack/releases).
+Extract the complete package and add its `bin` directory to `PATH`, or invoke
+`openocd.exe` by its full path. For example, if extracted to `C:\Tools\OpenOCD`:
+
+```powershell
+& "C:\Tools\OpenOCD\bin\openocd.exe" --version
+$env:Path = "C:\Tools\OpenOCD\bin;" + $env:Path
+```
+
+The `PATH` change above applies only to the current PowerShell session. For a
+persistent setup, add that directory to your Windows user `PATH`.
+
+Connect `SWDIO`, `SWCLK`, and `GND`. `NRST` is optional. On an official probe,
+connect a verified target-voltage sense input to the battery's `3.3V` pad when
+required. On common ST-Link/V2 dongles, pins labelled `3.3V` or `5V` are often
+power outputs: leave them disconnected and let the battery power itself.
+Wake the battery immediately before connecting so the MCU has power.
+
+Build the fork in Debug first. With the ARM toolchain, CMake and Ninja on
+`PATH`, run from the repository root (also works in Linux/WSL):
+
+```text
+cmake -S V11_BMS -B V11_BMS/build-debug-lto -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake -DCMAKE_BUILD_TYPE=Debug
+cmake --build V11_BMS/build-debug-lto --parallel 4
+```
+
+Check that `V11_BMS/build-debug-lto/samd20_firmware.elf` exists before flashing.
+The directory name does not select the adapter: the OpenOCD configuration does.
+If using another build directory, adjust the image paths below.
+
+Start in the repository root, or skip `cd V11_BMS` if already in that directory.
+Each OpenOCD command is on one line and works in PowerShell:
+
+```powershell
+cd V11_BMS
+openocd --version
+
+# Test the SWD connection; halts the MCU without erasing flash
+openocd -f openocd_samd20_stlink.cfg -c "adapter speed 100" -c "init; reset halt; targets; exit"
+
+# Program, verify, and reset an already unlocked device
+openocd -f openocd_samd20_stlink.cfg -c "adapter speed 100" -c "program build-debug-lto/samd20_firmware.elf verify reset exit"
+```
+
+Use these explicit commands for ST-Link: the project's `make flash` target
+currently selects the J-Link configuration.
+
+The successful programming log ends with:
+
+```text
+** Programming Finished **
+** Verify Started **
+** Verified OK **
+** Resetting Target **
+shutdown command invoked
+```
+
+`Verified OK` confirms that flash matches the image. It does not validate BMS
+operation; check the UART diagnostics and battery behaviour after programming.
+
+##### Hardware reset after flashing (NRST connected)
+
+Use this sequence only when the ST-Link `NRST` output is connected to the
+battery's `RST` pad. The default configuration does not declare a connected
+hardware reset signal; the following options enable it for this invocation.
+
+From `V11_BMS`, program and verify the image, then explicitly reset and run the
+MCU through NRST before closing OpenOCD. This example uses the fork Debug HEX;
+adjust the image path if downloaded or built elsewhere (ELF works too):
+
+```powershell
+openocd -f openocd_samd20_stlink.cfg -c "adapter speed 100" -c "reset_config srst_only srst_gates_jtag" -c "adapter srst pulse_width 100" -c "adapter srst delay 100" -c "program build-debug-lto/samd20_firmware.hex verify; reset run; sleep 500; targets; shutdown"
+```
+
+`program ... verify` leaves OpenOCD open for the subsequent `reset run`. Do not
+add `exit` to `program` in this sequence: it would close OpenOCD before that
+reset command. The reset pulse and post-reset delay are each 100 ms; the final
+500 ms wait allows startup before reporting the target state.
+
+If programming has already completed successfully, reset without rewriting
+flash using:
+
+```powershell
+openocd -f openocd_samd20_stlink.cfg -c "adapter speed 100" -c "reset_config srst_only srst_gates_jtag" -c "adapter srst pulse_width 100" -c "adapter srst delay 100" -c "init; reset run; sleep 500; targets; shutdown"
+```
+
+These command options have been checked against the documented xPack build,
+but this NRST sequence has not yet been hardware-validated for this project.
+If `Size 1 not supported`, `dsu_reset_deassert`, or `Unable to reset target`
+errors remain, reset handling is still failing; do not treat the operation as
+a successful startup. Keep the full log for diagnosis. Do not disable the DSU
+reset handler or use chip erase as a workaround.
+
+##### Unlocking a protected device
+
+Only if the device is still protected, a full erase/unlock is required before
+programming. **This permanently removes the original firmware and erases saved
+flash data.** Prepare the replacement image first. The following unlock sequence
+was not exercised in the successful ST-Link test above:
+
+```powershell
+openocd -f openocd_samd20_stlink.cfg -c "adapter speed 100" -c "init; mwb 0x41002100 0x10; sleep 500; reset; exit"
+```
+
+After a successful unlock, run the program command before disconnecting the
+adapter. Skip the separate full erase when updating an already unlocked device.
+
+##### Troubleshooting
+
+- **`openocd` is not recognized:** check the executable path and `PATH` setup above.
+- **`Error: open failed`:** OpenOCD could not open the USB probe. Check that Windows
+  detects ST-Link in Device Manager, try another USB port/data cable, and close
+  other software using the probe. If its driver is missing, install
+  [STSW-LINK009](https://www.st.com/en/development-tools/stsw-link009.html).
+- **Deprecated `stlink-dap.cfg` / `dapdirect_swd`:** these warnings appeared in the
+  successful test and do not prevent programming with that xPack build. The supplied
+  configuration retains the OpenOCD 0.12.0 names; the tested newer build accepts
+  them as compatibility aliases. Its
+  [ST-Link compatibility script](https://github.com/openocd-org/openocd/blob/e5888bda3/tcl/interface/stlink-dap.cfg)
+  forwards to `interface/stlink.cfg`.
+- **Direct DAP is unsupported:** check the probe firmware version. Older ST-Link
+  firmware may need an update before it can use this transport.
 
 ## Initial Battery Calibration
 

@@ -210,6 +210,11 @@ file(GLOB_RECURSE SOURCES src/*.c)
 # Define the ELF target
 add_executable(${PROJECT_NAME}.elf ${SOURCES})
 
+# Optimize across translation units to fit the available flash.
+target_compile_options(${PROJECT_NAME}.elf PRIVATE -flto)
+# KEEP(.vectors) only acts after LTO; root the table before LTO can discard it.
+target_link_options(${PROJECT_NAME}.elf PRIVATE -flto -Wl,-u,exception_table)
+
 target_compile_definitions(${PROJECT_NAME}.elf PRIVATE FW_GIT_REV="${FW_GIT_REV}")
 
 # -----------------------------------------------------------------------------
