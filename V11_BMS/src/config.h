@@ -9,6 +9,8 @@
 #ifndef CONFIG_H_
 #define CONFIG_H_
 
+#define FIRMWARE_VERSION_STR                "V11-BMS-1.0"
+
 // Pin definitions
 #define LED_ERR_RIGHT                       PIN_PA00
 #define LED_ERR_LEFT                        PIN_PA19
@@ -62,6 +64,8 @@
 // full discharge-to-charge cycle, anywhere from 30% to 120% of this - so 4000
 // covers anything from worn cells up to 4.8Ah ones.
 #define PACK_MAX_CAPACITY_MAH               4000
+#define PACK_CAPACITY_UPPER_BOUND_UAH       (PACK_MAX_CAPACITY_MAH * 1200ul)  // 120% of nominal, in uAh
+#define PACK_CAPACITY_LOWER_BOUND_UAH       (PACK_MAX_CAPACITY_MAH *  300ul)  // 30% of nominal, in uAh
 #define CELL_LOWEST_DISCHARGE_VOLTAGE       2500  //mV - wont allow pack to discharge if any cells lower than this
 #define CELL_LOWEST_CHARGE_VOLTAGE          2000    //mV - won't try to charge the pack if any cells lower than this
 // Below this a cell reading is not a flat cell, it is a broken measurement -

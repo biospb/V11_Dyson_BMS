@@ -11,7 +11,7 @@
 -----------------------------------------------------------------------------*/
 #include "serial_debug.h"
 #include "sw_timer.h"
-#ifdef SERIAL_DEBUG
+#if SERIAL_DEBUG
 #include <string.h>
 #endif
 #include "eeprom_handler.h"
@@ -38,7 +38,7 @@
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL VARIABLES
 -----------------------------------------------------------------------------*/
-#if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
+#if SERIAL_DEBUG || PROT_DEBUG_PRINT
 static struct usart_module debug_usart;
 static char debug_queue[DEBUG_QUEUE_SIZE];
 static volatile uint16_t queue_head = 0;  // write index
@@ -74,7 +74,7 @@ extern volatile struct eeprom_data eeprom_data;
  */
 void serial_debug_init()
 {
-#if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
+#if SERIAL_DEBUG || PROT_DEBUG_PRINT
   struct usart_config config_usart;
   usart_get_config_defaults(&config_usart);
 
@@ -106,7 +106,7 @@ void serial_debug_init()
  */
 void serial_debug_send_message(const char *msg)
 {
-#if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
+#if SERIAL_DEBUG || PROT_DEBUG_PRINT
   while (*msg)
   {
     uint16_t next_head = (queue_head + 1) % DEBUG_QUEUE_SIZE;
@@ -128,7 +128,7 @@ void serial_debug_send_message(const char *msg)
  */
 void serial_debug_process(void)
 {
-#if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
+#if SERIAL_DEBUG || PROT_DEBUG_PRINT
   if (queue_tail != queue_head)
   {
     SercomUsart *const hw = &(debug_usart.hw->USART);
@@ -152,7 +152,7 @@ void serial_debug_process(void)
  */
 void serial_debug_send_cell_voltages(void)
 {
-#if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
+#if SERIAL_DEBUG || PROT_DEBUG_PRINT
   char tmp[30];
   uint16_t *cell_voltages = bq7693_get_cell_voltages();
 
@@ -182,7 +182,7 @@ void serial_debug_send_cell_voltages(void)
  */
 void serial_debug_send_all_vc(void)
 {
-#if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
+#if SERIAL_DEBUG || PROT_DEBUG_PRINT
   char tmp[16];
   uint16_t vc[10];
 
@@ -207,7 +207,7 @@ void serial_debug_send_all_vc(void)
  */
 void serial_debug_send_pack_capacity(void)
 {
-#if defined(SERIAL_DEBUG) || defined(PROT_DEBUG_PRINT)
+#if SERIAL_DEBUG || PROT_DEBUG_PRINT
   char tmp[30];
   DEBUG_SNPRINTF(tmp, sizeof(tmp), "C: %ld mAh\r\n", eeprom_data.current_charge_level/1000);
   serial_debug_send_message(tmp);

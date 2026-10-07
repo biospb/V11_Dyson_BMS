@@ -112,7 +112,7 @@ void serial_init()
  */
 bool serial_rx_byte(uint8_t *ch)
 {
-  if (rx_ring_tail == rx_ring_head)
+  if (ch == NULL || rx_ring_tail == rx_ring_head)
     return false;
 
   *ch = rx_ring[rx_ring_tail];

@@ -54,7 +54,7 @@ typedef enum
 /*-----------------------------------------------------------------------------
   DECLARATION OF GLOBAL FUNCTIONS
 -----------------------------------------------------------------------------*/
-extern void bms_adc_init(void);
+extern bool bms_adc_init(void);
 extern uint16_t adc_convert_channel(bms_adc_ch_t ch);
 extern void adc_convert_channels(void);
 extern uint16_t bms_adc_read_ch(bms_adc_ch_t ch);

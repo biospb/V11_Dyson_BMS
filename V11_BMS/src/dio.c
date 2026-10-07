@@ -81,6 +81,13 @@ static const dio_cfg_t dio_cfg[DIO_NUM] =
  */
 void dio_init(void)
 {
+  for (uint32_t i = 0; i < DIO_NUM; i++)
+  {
+    uint8_t level = port_pin_get_input_level(dio_cfg[i].gpio_pin);
+    dio_data[i].value_old = level;
+    dio_data[i].debounced_value = level;
+    dio_data[i].debounce_counter = 0;
+  }
   sw_timer_start(&task_timer);
 }
 

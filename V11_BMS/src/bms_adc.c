@@ -35,6 +35,8 @@
 -----------------------------------------------------------------------------*/
 static uint16_t adc_result[BMS_ADC_CH_NUM] = {0};
 static struct adc_module adc_instance;
+static bool adc_ready = false;
+#define BMS_ADC_BUSY_LIMIT 65535u
 
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL CONSTANTS
@@ -82,7 +84,7 @@ static void adc_pin_set_peripheral(uint32_t pinmux)
  * Configures the SAMD20 ADC in 12-bit single-shot mode with
  * internal VCC/1.48 reference and disables all ADC interrupts.
  */
-void bms_adc_init(void)
+bool bms_adc_init(void)
 {
   struct adc_config config_adc;
 
@@ -97,7 +99,9 @@ void bms_adc_init(void)
   /* Initial channel does not matter */
   config_adc.positive_input  = ADC_POSITIVE_INPUT_PIN7;
 
-  adc_init(&adc_instance, ADC, &config_adc);
+  adc_ready = false;
+  if (adc_init(&adc_instance, ADC, &config_adc) != STATUS_OK)
+    return false;
 
   /* adc_init() muxed only config_adc.positive_input. Point every channel at
      its pin, or the ones it missed convert whatever the mux happens to see. */
@@ -111,6 +115,8 @@ void bms_adc_init(void)
   ADC->INTFLAG.reg  = ADC_INTFLAG_MASK;
 
   adc_enable(&adc_instance);
+  adc_ready = true;
+  return true;
 }
 
 /**
@@ -127,7 +133,7 @@ uint16_t adc_convert_channel(bms_adc_ch_t ch)
   enum status_code status;
   uint16_t result = 0xFFFF;
 
-  if(ch < BMS_ADC_CH_NUM)
+  if(adc_ready && (uint32_t)ch < (uint32_t)BMS_ADC_CH_NUM)
   {
     enum adc_positive_input ch_mux = adc_ch_map_cfg[ch];
 
@@ -137,11 +143,12 @@ uint16_t adc_convert_channel(bms_adc_ch_t ch)
     /* Start one-shot conversion */
     adc_start_conversion(&adc_instance);
 
-    /* Poll until conversion is complete */
+    /* Bound a failed conversion rather than waiting for the watchdog. */
+    uint32_t busy_count = 0;
     do
     {
       status = adc_read(&adc_instance, &result);
-    } while (status == STATUS_BUSY);
+    } while (status == STATUS_BUSY && ++busy_count < BMS_ADC_BUSY_LIMIT);
 
     if(status != STATUS_OK)
     {
@@ -162,34 +169,8 @@ uint16_t adc_convert_channel(bms_adc_ch_t ch)
  */
 void adc_convert_channels(void)
 {
-  enum status_code status;
-  uint16_t result;
-
-  for(uint16_t i = 0; i < (uint16_t)BMS_ADC_CH_NUM; i++)
-  {
-    enum adc_positive_input ch_mux = adc_ch_map_cfg[i];
-
-    /* Select ADC channel */
-    adc_set_positive_input(&adc_instance, ch_mux);
-
-    /* Start one-shot conversion */
-    adc_start_conversion(&adc_instance);
-
-    /* Poll until conversion is complete */
-    do
-    {
-      status = adc_read(&adc_instance, &result);
-    } while (status == STATUS_BUSY);
-
-    if(status == STATUS_OK)
-    {
-      adc_result[i] = result;
-    }
-    else
-    {
-      adc_result[i] = 0xFFFF;
-    }
-  }
+  for (uint32_t i = 0; i < (uint32_t)BMS_ADC_CH_NUM; i++)
+    adc_result[i] = adc_convert_channel((bms_adc_ch_t)i);
 }
 
 /**
@@ -202,7 +183,7 @@ uint16_t bms_adc_read_ch(bms_adc_ch_t ch)
 {
   uint16_t adc_ch_value = 0xFFFF;
 
-  if(ch < BMS_ADC_CH_NUM)
+  if(adc_ready && (uint32_t)ch < (uint32_t)BMS_ADC_CH_NUM)
   {
     adc_ch_value = adc_result[ch];
   }

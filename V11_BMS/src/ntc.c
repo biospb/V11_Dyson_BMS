@@ -41,7 +41,7 @@
  * NTC lookup table with 129 interpolation points.
  * Unit: 0.1 degC
  */
-int16_t NTC_table[NTC_TABLE_ENTRIES] = {
+static const int16_t NTC_table[NTC_TABLE_ENTRIES] = {
   1956, 1607, 1258, 1078, 958, 870, 800, 743,
   694, 652, 615, 582, 552, 525, 500, 477, 455,
   435, 416, 398, 381, 365, 350, 335, 321, 308,
@@ -85,23 +85,17 @@ int16_t NTC_ADC2Temperature(uint16_t adc_value)
   uint16_t adc_value_norm_u16;
   uint16_t idx;
 
+  if (adc_value > 0x0FFFu)
+    return NTC_INVALID_TEMPERATURE;
+
   // normalize ADC with Vref = (3.3V / 1.48) to 3.3V
   // normalized value should be LSB / 1.48
   adc_value_norm_u32 = (uint32_t)adc_value * (uint16_t)(32768.0 / 1.48);
   adc_value_norm_u16 = (uint16_t)(adc_value_norm_u32 >> 15);
 
-  /* Estimate the interpolating point before and after the ADC value.
-     A 12-bit conversion cannot exceed idx 86, but adc_convert_channel()
-     returns 0xFFFF on a conversion error, which lands at idx 1383 - a read
-     ~2.6kB past the end of the table, feeding garbage straight into the
-     over/under-temperature interlocks. Clamp so a bad reading saturates at
-     the cold end of the curve instead. */
   idx = (uint16_t)(adc_value_norm_u16 >> 5);
   if (idx > (uint16_t)(NTC_TABLE_ENTRIES - 2u))
-  {
-    idx = (uint16_t)(NTC_TABLE_ENTRIES - 2u);
-    adc_value_norm_u16 = (uint16_t)((idx << 5) | 0x1Fu);
-  }
+    return NTC_INVALID_TEMPERATURE;
 
   p1 = NTC_table[ idx     ];
   p2 = NTC_table[ idx + 1u];

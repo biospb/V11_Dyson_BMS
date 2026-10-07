@@ -73,7 +73,7 @@
 #define BQ7693_CC_LSB_MA        8.44f
 #define BQ7693_CC_PERIOD_MS     250.0f
 
-void bq7693_init(void);
+bool bq7693_init(void);
 bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf);
 bool bq7693_write_register(uint8_t addr, uint8_t data);
 
@@ -92,8 +92,8 @@ int bq7693_get_pack_voltage(void);
 bool bq7693_enable_charge(void);
 bool bq7693_enable_discharge(void);
 
-void bq7693_disable_charge(void);
-void bq7693_disable_discharge(void);
+bool bq7693_disable_charge(void);
+bool bq7693_disable_discharge(void);
 
 bool bq7693_enter_sleep_mode(void);
 

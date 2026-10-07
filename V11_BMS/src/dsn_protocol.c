@@ -41,7 +41,7 @@
 //    DECLARATION OF LOCAL MACROS/#DEFINES
 //-----------------------------------------------------------------------------
 
-#ifdef PROT_DEBUG_PRINT
+#if PROT_DEBUG_PRINT
 #include "serial_debug.h"
 #define DSN_PRINT(...) \
   { \
@@ -106,6 +106,9 @@
 // TLV pair IDs used in analyze_frame response logic
 #define PAIR_TLV_READ           0x1002
 #define PAIR_TLV_READ_RES       0x1001
+#define PAIR_MASKED_WRITE       0x8216
+#define TLV_CELL_V_FIRST        0x2301
+#define TLV_CELL_V_LAST         (TLV_CELL_V_FIRST + HANDSHAKE_NUM_CELLS - 1)
 
 // TLV register keys: (TYPE << 8) | REG
 #define TLV_TRIGGER_STATE       0x8100   // 1 byte: trigger on/off
@@ -127,11 +130,11 @@
 #define HANDSHAKE_MIN_CELL_MV   2650
 #define HANDSHAKE_MAX_CELL_MV   4200
 #define V11_BATTERY_TYPE        0x001F
-#define V11_CAPACITY_001MAH     (PACK_MAX_CAPACITY_MAH * 100u)  // in 0.01 mAh units
 
 // Firmware version string (22 bytes, queried by pair 0x0306)
 #define FW_VERSION_STR_LEN      22
-static const char fw_version_str[FW_VERSION_STR_LEN] = "V11-BMS-1.0";
+static const char fw_version_str[FW_VERSION_STR_LEN] = FIRMWARE_VERSION_STR;
+_Static_assert(sizeof(FIRMWARE_VERSION_STR) <= sizeof(fw_version_str), "Firmware version string is too long");
 
 // Motor speed thresholds from trigger messages
 #define MOTOR_SPEED_OFF         0
@@ -210,6 +213,10 @@ static uint8_t  frame_compute_hdr_crc8(const uint8_t *buf);
 
 static bool     rx_byte_handler(uint8_t ch);
 static bool     process_rx_frame(void);
+static uint16_t tlv_cell_voltages[HANDSHAKE_NUM_CELLS];
+static bool tlv_cells_loaded;
+static bool tlv_cells_valid;
+static bool load_tlv_cell_voltages(void);
 static uint16_t analyze_frame(proc_ctx_t *ctx, uint8_t req_class);
 static bool     dispatch_pair(proc_ctx_t *in_ctx, uint16_t pair, uint8_t *out_data, uint16_t out_size, uint16_t *out_len);
 static bool     dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len);
@@ -292,8 +299,8 @@ void dsn_prot_mainloop(void)
   // Session timeout: no messages for 2 s -> disconnect
   if (sw_timer_is_elapsed(&session_timer, SESSION_TIMEOUT_MS))
   {
-    if (vacuum_connected)
-      bq7693_disable_discharge();
+    if (vacuum_connected && !bq7693_disable_discharge())
+      bms_force_fault(BMS_ERR_I2C_FAIL);
     vacuum_connected = false;
   }
 
@@ -342,7 +349,8 @@ void dsn_prot_mainloop(void)
       {
         DSN_PRINT("PROT:MS_WDT\r\n");
         port_pin_set_output_level(PRECHARGE_PIN, false);
-        bq7693_disable_discharge();
+        if (!bq7693_disable_discharge())
+          bms_force_fault(BMS_ERR_I2C_FAIL);
         vacuum_connected = false;
         motor_speed_seen = false;
         sw_timer_start(&session_timer);
@@ -722,6 +730,8 @@ static bool process_rx_frame(void)
   handshake_key_seen = false;
 
   // Run the TLV frame analyzer
+  tlv_cells_loaded = false;
+  tlv_cells_valid = false;
   resp_payload_len = analyze_frame(&ctx, req_class);
 
   // Complete handshake when the startup-only key (TLV_MAX_PACK_V) was queried
@@ -777,7 +787,7 @@ static uint16_t analyze_frame(proc_ctx_t *ctx, uint8_t req_class)
 
   (void)req_class;
 
-  if (ctx->in_remaining == 0)
+  if (ctx->in_remaining == 0 || ctx->out_remaining == 0)
     return 0;
 
   // Copy rolling counter to output
@@ -807,6 +817,17 @@ static uint16_t analyze_frame(proc_ctx_t *ctx, uint8_t req_class)
       // so we must stop processing to avoid corrupting subsequent pairs.
       DSN_PRINT("RX:UNK_PAIR 0x%04X\r\n", pair);
       break;
+    }
+
+    if (pair == PAIR_MASKED_WRITE)
+    {
+      if (ctx->out_remaining < 2)
+        break;
+      HTOLE16(ctx->out_ptr, 0x0001);
+      ctx->out_ptr += 2;
+      ctx->out_remaining -= 2;
+      total_written += 2;
+      continue;
     }
 
     if (resp_len == 0)
@@ -924,21 +945,25 @@ static bool dispatch_pair(proc_ctx_t *in_ctx, uint16_t pair, uint8_t *out_data, 
 
       req_len = in[1];
 
-      if (req_len > FW_VERSION_STR_LEN)
-        req_len = FW_VERSION_STR_LEN;
+      uint8_t offset = in[0];
+      if (offset >= FW_VERSION_STR_LEN)
+        req_len = 0;
+      else if (req_len > FW_VERSION_STR_LEN - offset)
+        req_len = FW_VERSION_STR_LEN - offset;
 
       if (1 + req_len > out_size)
         return true;
 
       out_data[0] = req_len;
-      memcpy(&out_data[1], fw_version_str, req_len);
+      if (req_len > 0)
+        memcpy(&out_data[1], &fw_version_str[offset], req_len);
       *out_len = 1 + req_len;
       return true;
     }
 
     //---------------------------------------------------------------------------------------------
-    // BMS_MASKED_WRITE: [0x16 0x82] [VAL_LO] [VAL_HI] [MASK_LO] [MASK_HI] -> silent ack
-    case 0x8216:
+    // BMS_MASKED_WRITE: [0x16 0x82] [VAL_LO] [VAL_HI] [MASK_LO] [MASK_HI] -> raw 0x0001 acknowledgement
+    case PAIR_MASKED_WRITE:
       if (in_ctx->in_remaining < 4)
         return false;
 
@@ -983,6 +1008,23 @@ static bool dispatch_pair(proc_ctx_t *in_ctx, uint16_t pair, uint8_t *out_data, 
  * @brief  TLV register dispatcher: map (TYPE<<8)|REG keys to BMS sensor values.
  * @return true if key known.
  */
+static bool load_tlv_cell_voltages(void)
+{
+  if (!tlv_cells_loaded)
+  {
+    tlv_cells_loaded = true;
+    uint16_t *cells = bq7693_get_cell_voltages();
+    if (!bq7693_comm_healthy())
+      bms_force_fault(BMS_ERR_I2C_FAIL);
+    else
+    {
+      memcpy(tlv_cell_voltages, cells, sizeof(tlv_cell_voltages));
+      tlv_cells_valid = true;
+    }
+  }
+  return tlv_cells_valid;
+}
+
 static bool dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len)
 {
   uint16_t soc;
@@ -990,6 +1032,14 @@ static bool dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len
   uint32_t val32;
 
   *out_len = 0;
+  if (key >= TLV_CELL_V_FIRST && key <= TLV_CELL_V_LAST)
+  {
+    if (!load_tlv_cell_voltages())
+      return false;
+    HTOLE16(out_data, tlv_cell_voltages[key - TLV_CELL_V_FIRST]);
+    *out_len = 2;
+    return true;
+  }
 
   switch (key)
   {
@@ -1030,12 +1080,24 @@ static bool dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len
       return true;
 
     case TLV_MAX_CELL_V:  // 0x250B: max cell voltage mV
-      HTOLE16(out_data, HANDSHAKE_MAX_CELL_MV);
+      if (!load_tlv_cell_voltages())
+        return false;
+      val = tlv_cell_voltages[0];
+      for (uint8_t i = 1; i < HANDSHAKE_NUM_CELLS; i++)
+        if (tlv_cell_voltages[i] > val)
+          val = tlv_cell_voltages[i];
+      HTOLE16(out_data, val);
       *out_len = 2;
       return true;
 
     case TLV_MIN_CELL_V:  // 0x250C: min cell voltage mV
-      HTOLE16(out_data, HANDSHAKE_MIN_CELL_MV);
+      if (!load_tlv_cell_voltages())
+        return false;
+      val = tlv_cell_voltages[0];
+      for (uint8_t i = 1; i < HANDSHAKE_NUM_CELLS; i++)
+        if (tlv_cell_voltages[i] < val)
+          val = tlv_cell_voltages[i];
+      HTOLE16(out_data, val);
       *out_len = 2;
       return true;
 
@@ -1064,7 +1126,7 @@ static bool dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len
       return true;
 
     case TLV_FULL_CHARGE_CAP:  // 0x0201: full charge capacity (0.01 mAh)
-      val32 = V11_CAPACITY_001MAH;
+      val32 = bms_get_full_charge_capacity_001mah();
       HTOLE32(out_data, val32);
       *out_len = 4;
       return true;
@@ -1110,7 +1172,8 @@ static void handle_sleep(void)
   vacuum_connected = false;
   charger_at_sleep  = dio_read(DIO_CHARGER_CONNECTED);
   mode_btn_at_sleep = dio_read(DIO_MODE_BUTTON);
-  bq7693_disable_discharge();
+  if (!bq7693_disable_discharge())
+    bms_force_fault(BMS_ERR_I2C_FAIL);
   port_pin_set_output_level(PRECHARGE_PIN, false);
   /*
    * The mode button pull-up rail stays ON here on purpose.

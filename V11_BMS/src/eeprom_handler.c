@@ -17,6 +17,13 @@ volatile struct eeprom_data eeprom_data;
  */
 static struct eeprom_data eeprom_shadow;
 static bool eeprom_shadow_valid = false;
+static bool eeprom_ok = false;
+static bool eeprom_data_valid = false;
+
+bool eeprom_healthy(void)
+{
+  return eeprom_ok;
+}
 
 /*
  * Set when eeprom_init() rejected the stored page and replaced it with
@@ -29,7 +36,7 @@ static bool eeprom_reset_on_init = false;
 /**
  * @brief Write factory default values to EEPROM (capacity reset).
  */
-void eeprom_write_defaults(void)
+enum eeprom_write_result eeprom_write_defaults(void)
 {
   /*
    * Start at nominal, not 120% of it. The 120% seed only made sense while the
@@ -43,7 +50,8 @@ void eeprom_write_defaults(void)
   eeprom_data.current_charge_level     = ((PACK_MAX_CAPACITY_MAH / 2) * 1000ul);
   eeprom_data.full_discharge_seen      = 0;
   eeprom_data.idle_wakes               = 0;
-  eeprom_write();
+  eeprom_data_valid = true;
+  return eeprom_write();
 }
 
 /**
@@ -76,17 +84,22 @@ int eeprom_init(void)
     //Init/format the eeprom
     eeprom_emulator_erase_memory();
     error_code = eeprom_emulator_init();
-    eeprom_write_defaults();
+    if (error_code != STATUS_OK || eeprom_write_defaults() == EEPROM_WRITE_FAILED)
+      return -1;
     eeprom_reset_on_init = true;
   }
   else
   {
     //EEPROM emulator OK - read data and verify CRC
-    if (eeprom_read() != 0)
+    int read_status = eeprom_read();
+    if (read_status == -2)
+      return -1; // An unread page must not be replaced with defaults.
+    if (read_status != 0)
     {
       //Corrupt, or written by firmware with a different EEPROM_MAGIC.
       //Either way the stored values cannot be trusted - start clean.
-      eeprom_write_defaults();
+      if (eeprom_write_defaults() == EEPROM_WRITE_FAILED)
+        return -1;
       eeprom_reset_on_init = true;
     }
   }
@@ -97,12 +110,16 @@ int eeprom_init(void)
 /**
  * @brief Read EEPROM page, verify CRC32 integrity and the layout marker.
  *
- * @return 0 on success, -1 if the page is corrupt or not ours.
+ * @return 0 on success, -1 for invalid contents, -2 for a failed page read
  */
 int eeprom_read(void)
 {
   uint8_t buffer[EEPROM_PAGE_SIZE];
-  eeprom_emulator_read_page(0, buffer);
+  eeprom_ok = false;
+  eeprom_shadow_valid = false;
+  eeprom_data_valid = false;
+  if (eeprom_emulator_read_page(0, buffer) != STATUS_OK)
+    return -2;
   memcpy((void*)&eeprom_data, buffer, sizeof(eeprom_data));
 
   //Verify CRC over data fields (everything before the crc32 field)
@@ -123,24 +140,35 @@ int eeprom_read(void)
     return -1;
   }
 
+  if (eeprom_data.total_pack_capacity <= 0 ||
+      eeprom_data.total_pack_capacity > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH ||
+      eeprom_data.current_charge_level < 0 ||
+      eeprom_data.current_charge_level > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH ||
+      eeprom_data.full_discharge_seen > 1 ||
+      eeprom_data.idle_wakes > STORAGE_IDLE_WAKES)
+    return -1;
+
   //What we just read is, by definition, what is stored.
   eeprom_shadow.total_pack_capacity  = eeprom_data.total_pack_capacity;
   eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
   eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
   eeprom_shadow.idle_wakes           = eeprom_data.idle_wakes;
   eeprom_shadow_valid = true;
+  eeprom_ok = true;
+  eeprom_data_valid = true;
   return 0;
 }
 
 /**
  * @brief Compute CRC32 and write the EEPROM page, unless it is already current.
  *
- * @return true if the page was written, false if the stored values were
- *         already current. (Not the 0/-1 convention of eeprom_read(): this
- *         is not a success code, neither outcome is a failure.)
+ * @return EEPROM_WRITTEN, EEPROM_UNCHANGED, or EEPROM_WRITE_FAILED
  */
-bool eeprom_write(void)
+enum eeprom_write_result eeprom_write(void)
 {
+  if (!eeprom_data_valid)
+    return EEPROM_WRITE_FAILED;
+
   /*
    * Stamped on every write, so no path can store a page carrying a stale
    * marker. The skip below stays safe: a valid shadow can only have come from
@@ -164,15 +192,10 @@ bool eeprom_write(void)
    * cycle, which is why the threshold wants to stay small. Set it to 0 for an
    * exact compare.
    *
-   * Even at 0 the skip still fires often: with the FETs off and no load the
-   * coulomb counter sits at 0-1 LSB, and cc_uah = ccVal * 19205 / 32768
-   * integer divides to zero for |ccVal| <= 1, so a pack that wakes, sees
-   * nothing and sleeps again 20s later has a bit-identical charge level.
-   *
    * Comparing fields rather than memcmp() also sidesteps the three padding
    * bytes the struct carries before crc32.
    */
-  if (eeprom_shadow_valid
+  if (eeprom_ok && eeprom_shadow_valid
       && (eeprom_data.total_pack_capacity == eeprom_shadow.total_pack_capacity)
       && (eeprom_data.full_discharge_seen == eeprom_shadow.full_discharge_seen)
       && (eeprom_data.idle_wakes          == eeprom_shadow.idle_wakes))
@@ -186,7 +209,7 @@ bool eeprom_write(void)
 
     if (drift <= (int32_t)EEPROM_CHARGE_TOLERANCE_UAH)
     {
-      return false;   //nothing worth a flash erase
+      return EEPROM_UNCHANGED;
     }
   }
 
@@ -194,17 +217,23 @@ bool eeprom_write(void)
   eeprom_data.crc32 = calc_crc32((const uint8_t *)&eeprom_data,
       sizeof(eeprom_data) - sizeof(eeprom_data.crc32));
 
-  uint8_t buffer[EEPROM_PAGE_SIZE];
+  uint8_t buffer[EEPROM_PAGE_SIZE] = {0};
   memcpy(buffer, (const void*)&eeprom_data, sizeof(eeprom_data));
-  eeprom_emulator_write_page(0, buffer);
-  eeprom_emulator_commit_page_buffer();
+  if (eeprom_emulator_write_page(0, buffer) != STATUS_OK ||
+      eeprom_emulator_commit_page_buffer() != STATUS_OK)
+  {
+    eeprom_ok = false;
+    eeprom_shadow_valid = false;
+    return EEPROM_WRITE_FAILED;
+  }
+  eeprom_ok = true;
 
   eeprom_shadow.total_pack_capacity  = eeprom_data.total_pack_capacity;
   eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
   eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
   eeprom_shadow.idle_wakes           = eeprom_data.idle_wakes;
   eeprom_shadow_valid = true;
-  return true;   //written
+  return EEPROM_WRITTEN;
 }
 
 /**

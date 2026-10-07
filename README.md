@@ -119,16 +119,28 @@ IF YOU DO NOT FULLY UNDERSTAND THE RISKS OF LITHIUM BATTERIES, DO NOT USE THIS P
 - Dyson V12 (set `TRIGGER_TOGGLE_MODE` to 1 in `config.h` — see below)
 
 The firmware implements the Dyson serial protocol with TLV-based communication.
+Cell-voltage registers `0x2301`..`0x2307` and cell min/max return a shared
+snapshot of the measured cells for each request frame. Full-charge capacity is
+the learned value in 0.01 mAh units. Version reads honor their offset, and
+masked-write requests `0x8216` receive the raw `0x0001` acknowledgement; the
+requested masked value is still not applied. The existing nonblocking protocol
+sleep and mode-button wake behavior are preserved.
+
+BQ7693 initialization stops at the first failed step. An incomplete setup cannot
+be treated as healthy by later safety checks. FET disables report transfer
+failures, discharge enables check every setup/restore write, and fault requests
+survive ordinary state transitions. The displayed SOC is zero for discharged/UV
+faults, and runtime calculation retains precision before its final division.
 
 ### Compile-time Options (`config.h`)
 
 | Define | Default | Purpose |
 |--------|---------|---------|
 | `TRIGGER_TOGGLE_MODE` | `2` | Trigger behaviour. `0` = momentary (hold to run, the V11/V15 behaviour). `1` = toggle (each press flips run/stop; hold past `TRIGGER_HOLD_MS` to force stop). `2` = hybrid, see [Trigger](#trigger). Set to `1` for the Dyson V12, whose trigger is a click-to-latch button rather than a held switch. |
-| `PACK_MAX_CAPACITY_MAH` | `4000` | Capacity of ONE fitted cell (the pack is 7S1P). Only a starting point - the first full cycle learns the real figure within 30%..120% of it (1200..4800 mAh at 4000). Also seeds the defaults and is reported to the cleaner as the full-charge capacity. Original Dyson cells are 3600. |
+| `PACK_MAX_CAPACITY_MAH` | `4000` | Capacity of ONE fitted cell (the pack is 7S1P). Only a starting point - the first full cycle learns the real figure within 30%..120% of it (1200..4800 mAh at 4000). Also seeds the defaults; the cleaner receives the learned full-charge capacity. Original Dyson cells are 3600. |
 | `CELL_BALANCE_ENABLE` | `1` | Passive cell balancing on the dock, see [Cell Balancing](#cell-balancing). `0` compiles it out. |
 | `SHIP_MODE_ENABLE` | `1` | `0` keeps the pack from ever entering SHIP mode - a bench setting, see [Sleep and Wake](#sleep-and-wake). |
-| `SERIAL_DEBUG`, `PROT_DEBUG_PRINT` | defined | Debug log, see [Debug Log](#debug-log). Tested with `#ifdef`: comment the line out to disable, setting it to `0` does nothing. |
+| `SERIAL_DEBUG`, `PROT_DEBUG_PRINT` | `1` | Debug log, see [Debug Log](#debug-log). Set either switch to `0` to disable its output; set both to `0` to disable the debug UART. |
 
 All thresholds and timeouts mentioned below are in `config.h`, with the
 reasoning behind each value next to it.
@@ -217,7 +229,8 @@ After this single full cycle, SOC and runtime estimates will be accurate.
 
 On every subsequent charge completion:
 - If a full discharge was previously seen, the measured charge is adopted as the new capacity (hard learning).
-- Otherwise, the estimated capacity decays slowly toward the measured charge (1/8 filter per cycle).
+- Otherwise, the learned capacity is preserved and only the charge level is
+  anchored to full. Partial cycles no longer reduce the learned capacity.
 
 Only a full cycle may raise the learned capacity; a partial one can only
 lower it. It is kept between 30% and 120% of `PACK_MAX_CAPACITY_MAH`, so an
@@ -232,6 +245,17 @@ to SHIP mode, on entering a fault, at the end of a charge, and on each standby
 wake that advances the storage count. A write is skipped when nothing changed
 (the charge level by less than `EEPROM_CHARGE_TOLERANCE_UAH`, 10 mAh), so
 repeated faults or wakes do not wear the flash.
+
+EEPROM operations distinguish a successful write, unchanged data, and failure.
+A failed page read does not overwrite saved data with defaults. Persistence
+failures block charge and discharge; shutdown still proceeds after logging a
+failed final write so a faulty pack does not stay awake draining the cells.
+The stored layout and `EEPROM_MAGIC` are unchanged by these checks.
+
+Coulomb counting retains the fractional remainder between samples. If clearing
+`CC_READY` fails after counting a sample, the firmware faults and clears the
+ambiguous window before counting again. This can discard a window during bus
+recovery, but cannot count that ambiguous sample twice.
 
 ### Factory Reset (EEPROM Defaults)
 
@@ -458,6 +482,8 @@ away. Nothing to do but wait.
 | `___ ___ ___ ___` | Overvoltage trip |
 | `___ ___ ___ ___ ___` | BQ7693 unreachable, bad CRC, internal AFE fault, or an external protector fired |
 | `___ ___ ___ ___ ___ ___` | Watchdog fired - firmware stalled |
+| `___ ___ ___ ___ ___ ___ ___` | ADC initialization or conversion failed |
+| `___ ___ ___ ___ ___ ___ ___ ___` | EEPROM initialization, read, or write failed |
 
 `___` = long flash (700 ms), `-` = short flash (150 ms).
 

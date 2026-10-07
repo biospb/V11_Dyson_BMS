@@ -34,6 +34,7 @@
 -----------------------------------------------------------------------------*/
 /* Number of interpolation points in NTC_table[] */
 #define NTC_TABLE_ENTRIES   129
+#define NTC_INVALID_TEMPERATURE INT16_MIN
 
 extern int16_t NTC_ADC2Temperature(uint16_t adc_value);
 

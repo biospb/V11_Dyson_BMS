@@ -9,7 +9,7 @@
 
 #include "bq7693.h"
 
-void bq7693_i2c_init(void);
+static bool bq7693_i2c_init(void);
 
 //"internal" function primitives
 uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t data);
@@ -20,6 +20,8 @@ uint16_t bq7693_cell_voltages[7];
 
 /* Cleared by bq7693_comm_clear_error(), latched false by any failed transfer. */
 static volatile bool bq7693_comm_ok = true;
+static bool bq7693_i2c_ready = false;
+static bool bq7693_configured = false;
 
 volatile int bq7693_adc_gain = 0;   // in uV/LSB
 volatile int8_t bq7693_adc_offset = 0; //in mV
@@ -56,7 +58,7 @@ static inline void pin_set_peripheral_function(uint32_t pinmux)
 }
 
 /** @brief Initialize I2C master on SERCOM1 for BQ7693 communication. */
-void bq7693_i2c_init()
+static bool bq7693_i2c_init(void)
  {
   //I2C peripheral init
   struct i2c_master_config config_i2c_master;
@@ -72,65 +74,45 @@ void bq7693_i2c_init()
   config_i2c_master.pinmux_pad1               = PINMUX_PA17C_SERCOM1_PAD1;
   config_i2c_master.scl_low_timeout           = true;
 
-  i2c_master_init(&i2c_master_instance, SERCOM1, &config_i2c_master);
+  if (i2c_master_init(&i2c_master_instance, SERCOM1, &config_i2c_master) != STATUS_OK)
+    return false;
   i2c_master_enable(&i2c_master_instance);
+  bq7693_i2c_ready = true;
+  return true;
 }
 
 /** @brief Initialize BQ7693 protector IC: read ADC cal, set protection thresholds, enable CC. */
-void bq7693_init()
+bool bq7693_init(void)
 {
-  bq7693_i2c_init();
-  bq7693_write_register(SYS_CTRL2, 0x00); //Ensure that charge/discharge FETs are off so pack is safe.
-
-  /*
-   * Read the ADC calibration. A read that fails leaves its buffer untouched,
-   * so these start at the middle of the trimmed range - GAIN 365+15 uV/LSB,
-   * OFFSET 0mV - rather than at whatever was on the stack. The values go
-   * straight into the OV/UV trip registers below, and stack garbage there
-   * could put the AFE's own trips anywhere. The failed read has latched the
-   * comm error, so the first safety check faults the pack regardless; this
-   * only bounds what the AFE is told in the meantime.
-   */
-  uint8_t offset_raw = 0x00;   // 0mV
-  uint8_t gain1_raw  = 0x04;   // ADCGAIN<4:3> = 01  } 15 of 0..31, the
-  uint8_t gain2_raw  = 0xE0;   // ADCGAIN<2:0> = 111 } middle of the range
-  uint8_t trip;
-
-  (void)bq7693_read_register(ADCOFFSET, 1, &offset_raw);
-  (void)bq7693_read_register(ADCGAIN1,  1, &gain1_raw);
-  (void)bq7693_read_register(ADCGAIN2,  1, &gain2_raw);
-  bq7693_adc_offset = (int8_t)offset_raw;   // 2's complement, mV
-  bq7693_adc_gain   = 365 + (((gain1_raw & 0x0C) << 1) | ((gain2_raw & 0xE0) >> 5)); // uV/LSB
-
-  bq7693_write_register(PROTECT1, 0x82);
-  bq7693_write_register(PROTECT2, 0x04);
-
-  //This sets overvolt and undervolt delays to 1 second.
-  bq7693_write_register(PROTECT3, 0x00);
-
-  //Calculate OV and UV trip voltages.
-  trip = (((((long)CELL_OVERVOLTAGE_TRIP - bq7693_adc_offset)*1000)/ bq7693_adc_gain) >> 4) & 0xFF;
-  bq7693_write_register(OV_TRIP, trip);
-
+  uint8_t offset_raw, gain1_raw, gain2_raw, trip, sys_stat;
+  bq7693_configured = false;
+  if (!bq7693_i2c_init() || !bq7693_write_register(SYS_CTRL2, 0x00))
+    return false;
+  if (!bq7693_read_register(ADCOFFSET, 1, &offset_raw) ||
+      !bq7693_read_register(ADCGAIN1, 1, &gain1_raw) ||
+      !bq7693_read_register(ADCGAIN2, 1, &gain2_raw))
+    return false;
+  bq7693_adc_offset = (int8_t)offset_raw;
+  bq7693_adc_gain = 365 + (((gain1_raw & 0x0C) << 1) | ((gain2_raw & 0xE0) >> 5));
+  if (!bq7693_write_register(PROTECT1, 0x82) ||
+      !bq7693_write_register(PROTECT2, 0x04) ||
+      !bq7693_write_register(PROTECT3, 0x00))
+    return false;
+  trip = (((((long)CELL_OVERVOLTAGE_TRIP - bq7693_adc_offset) * 1000) / bq7693_adc_gain) >> 4) & 0xFF;
+  if (!bq7693_write_register(OV_TRIP, trip))
+    return false;
   trip = (((((long)CELL_UNDERVOLTAGE_TRIP - bq7693_adc_offset) * 1000) / bq7693_adc_gain) >> 4) & 0xFF;
-  bq7693_write_register(UV_TRIP, trip);
-
-  bq7693_write_register(CELLBAL1, 0x00); //Disable cell balancing 1
-  bq7693_write_register(CELLBAL2, 0x00); //Disable cell balancing 2
-
-  bq7693_write_register(CC_CFG, 0x19); //'magic' value as per datasheet.
-  bq7693_write_register(SYS_CTRL2, 0x40); //CC_EN - enable continuous operation of coulomb counter
-
-  bq7693_write_register(SYS_CTRL1, SYS_CTRL1_RUN); //ADC_EN, plus TEMP_SEL if enabled
-
-  //Explicitly clear any set bits in the SYS_STAT register by writing them
-  //back - but only bits we actually read. Writing an unread byte back would
-  //poke the reserved bit and clear nothing in particular.
-  uint8_t sys_stat;
-  if (bq7693_read_register(SYS_STAT, 1, &sys_stat))
-  {
-    bq7693_write_register(SYS_STAT, sys_stat);
-  }
+  if (!bq7693_write_register(UV_TRIP, trip) ||
+      !bq7693_write_register(CELLBAL1, 0x00) ||
+      !bq7693_write_register(CELLBAL2, 0x00) ||
+      !bq7693_write_register(CC_CFG, 0x19) ||
+      !bq7693_write_register(SYS_CTRL2, 0x40) ||
+      !bq7693_write_register(SYS_CTRL1, SYS_CTRL1_RUN) ||
+      !bq7693_read_register(SYS_STAT, 1, &sys_stat) ||
+      !bq7693_write_register(SYS_STAT, sys_stat))
+    return false;
+  bq7693_configured = true;
+  return true;
 }
 
 /**
@@ -243,12 +225,19 @@ static bool bq7693_read_attempt(uint8_t addr, size_t len, uint8_t *buf)
  */
 bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
 {
+  if (!bq7693_i2c_ready)
+  {
+    bq7693_comm_ok = false;
+    return false;
+  }
   bool result = false;
   uint8_t attempt;
 
   //Disable interrupts from the EIC - we don't want to end up trying to read the
   //charge counter half way through an existing i2c op. Re-enable at the end.
-  system_interrupt_disable(SYSTEM_INTERRUPT_MODULE_EIC);
+  bool eic_was_enabled = system_interrupt_is_enabled(SYSTEM_INTERRUPT_MODULE_EIC);
+  if (eic_was_enabled)
+    system_interrupt_disable(SYSTEM_INTERRUPT_MODULE_EIC);
 
   for (attempt = 0u; (attempt < BQ7693_READ_ATTEMPTS) && !result; attempt++)
   {
@@ -275,7 +264,8 @@ bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf)
     bq7693_comm_ok = false;
   }
 
-  system_interrupt_enable(SYSTEM_INTERRUPT_MODULE_EIC);
+  if (eic_was_enabled)
+    system_interrupt_enable(SYSTEM_INTERRUPT_MODULE_EIC);
   return result;
 }
 
@@ -331,10 +321,17 @@ static bool bq7693_write_attempt(uint8_t addr, uint8_t value)
  */
 bool bq7693_write_register(uint8_t addr, uint8_t value)
 {
+  if (!bq7693_i2c_ready)
+  {
+    bq7693_comm_ok = false;
+    return false;
+  }
   bool result = false;
   uint8_t attempt;
 
-  system_interrupt_disable(SYSTEM_INTERRUPT_MODULE_EIC);
+  bool eic_was_enabled = system_interrupt_is_enabled(SYSTEM_INTERRUPT_MODULE_EIC);
+  if (eic_was_enabled)
+    system_interrupt_disable(SYSTEM_INTERRUPT_MODULE_EIC);
 
   for (attempt = 0u; (attempt < BQ7693_WRITE_ATTEMPTS) && !result; attempt++)
   {
@@ -351,7 +348,8 @@ bool bq7693_write_register(uint8_t addr, uint8_t value)
     bq7693_comm_ok = false;
   }
 
-  system_interrupt_enable(SYSTEM_INTERRUPT_MODULE_EIC);
+  if (eic_was_enabled)
+    system_interrupt_enable(SYSTEM_INTERRUPT_MODULE_EIC);
   return result;
 }
 
@@ -364,7 +362,7 @@ void bq7693_comm_clear_error(void)
 /** @brief False if any transfer since the last clear failed. */
 bool bq7693_comm_healthy(void)
 {
-  return bq7693_comm_ok;
+  return bq7693_configured && bq7693_comm_ok;
 }
 
 /**
@@ -403,6 +401,8 @@ uint8_t bq7693_calc_checksum(uint8_t inCrc, uint8_t inData)
  */
 bool bq7693_enable_charge(void)
 {
+  if (!bq7693_configured)
+    return false;
   uint8_t ctrl2;
 
   /*
@@ -424,22 +424,16 @@ bool bq7693_enable_charge(void)
 }
 
 /** @brief Disable the charge FET, preserving DSG state. */
-void bq7693_disable_charge(void)
+bool bq7693_disable_charge(void)
 {
   uint8_t ctrl2;
-
-  /* A disable must not silently do nothing, so if the register cannot be read
-     fall back to the known-safe value rather than skipping the write or
-     modifying stack garbage: both FETs off, coulomb counter still running.
-     Losing DSG as collateral is acceptable - the bus is failing, and
-     BMS_ERR_I2C_FAIL is already latched by the failed read. */
   if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
   {
-    bq7693_write_register(SYS_CTRL2, SYS_CTRL2_CC_EN);
-    return;
+    // Best effort: both FETs off, CC on; still report the failed read.
+    (void)bq7693_write_register(SYS_CTRL2, SYS_CTRL2_CC_EN);
+    return false;
   }
-
-  bq7693_write_register(SYS_CTRL2, ctrl2 & ~SYS_CTRL2_CHG_ON);
+  return bq7693_write_register(SYS_CTRL2, ctrl2 & ~SYS_CTRL2_CHG_ON);
 }
 
 /**
@@ -448,50 +442,30 @@ void bq7693_disable_charge(void)
  */
 bool bq7693_enable_discharge(void)
 {
-  bq7693_write_register(SYS_CTRL1, SYS_CTRL1_RUN);  //ADC_EN=1, plus TEMP_SEL if enabled
-
-  bq7693_write_register(PROTECT1, 0x9F);
-  bq7693_write_register(PROTECT2, 0x04);
-
   uint8_t ctrl2;
-  bool    ok;
-
-  /* SYS_STAT is cleared by the caller through the latch - see
-     bq7693_enable_charge(). */
-
-  //DSG_ON turns the discharge FET on. Preserve CHG_ON so charging is not affected.
-  /* As in bq7693_enable_charge(): never turn a FET on from an unknown state. */
-  if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
-  {
-    bq7693_write_register(PROTECT1, 0x82);   //restore the normal SCD threshold
-    return false;
-  }
-
-  ok = bq7693_write_register(SYS_CTRL2, ctrl2 | SYS_CTRL2_CC_EN | SYS_CTRL2_DSG_ON);
-
-  bq7693_write_register(PROTECT2, 0x04);
-  /* Must land: leaving PROTECT1 at the relaxed 0x9F used during turn-on would
-     keep the short-circuit threshold at 200mV instead of 89mV. The write is
-     retried internally, and a failure latches the comm error. */
-  ok = bq7693_write_register(PROTECT1, 0x82) && ok;
-
-  return ok;
+  bool ok = bq7693_configured &&
+            bq7693_write_register(SYS_CTRL1, SYS_CTRL1_RUN) &&
+            bq7693_write_register(PROTECT1, 0x9F) &&
+            bq7693_write_register(PROTECT2, 0x04) &&
+            bq7693_read_register(SYS_CTRL2, 1, &ctrl2) &&
+            bq7693_write_register(SYS_CTRL2, ctrl2 | SYS_CTRL2_CC_EN | SYS_CTRL2_DSG_ON);
+  // Restore both protection registers even if an earlier step failed.
+  bool protect2_ok = bq7693_write_register(PROTECT2, 0x04);
+  bool protect1_ok = bq7693_write_register(PROTECT1, 0x82);
+  return ok && protect2_ok && protect1_ok;
 }
 
 /** @brief Disable the discharge FET, preserving CHG state. */
-void bq7693_disable_discharge(void)
+bool bq7693_disable_discharge(void)
 {
   uint8_t ctrl2;
-
-  /* See bq7693_disable_charge() - a failed disable falls back to both FETs
-     off rather than doing nothing. */
   if (!bq7693_read_register(SYS_CTRL2, 1, &ctrl2))
   {
-    bq7693_write_register(SYS_CTRL2, SYS_CTRL2_CC_EN);
-    return;
+    // Best effort: both FETs off, CC on; still report the failed read.
+    (void)bq7693_write_register(SYS_CTRL2, SYS_CTRL2_CC_EN);
+    return false;
   }
-
-  bq7693_write_register(SYS_CTRL2, ctrl2 & ~SYS_CTRL2_DSG_ON);
+  return bq7693_write_register(SYS_CTRL2, ctrl2 & ~SYS_CTRL2_DSG_ON);
 }
 
 /**

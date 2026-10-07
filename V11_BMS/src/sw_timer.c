@@ -33,7 +33,7 @@
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL VARIABLES
 -----------------------------------------------------------------------------*/
-static volatile uint32_t sw_timer_clock = 0;
+static volatile uint32_t sw_timer_clock = 1;
 struct tc_module tc_instance;
 
 
@@ -78,8 +78,8 @@ void sw_timer_init(void)
   config_tc.clock_prescaler = TC_CLOCK_PRESCALER_DIV1;
   config_tc.wave_generation = TC_WAVE_GENERATION_MATCH_FREQ;
   config_tc.counter_16_bit.value = 0;
-  config_tc.counter_16_bit.compare_capture_channel[0] = (uint16_t)cycles_per_tick;
-  config_tc.counter_16_bit.compare_capture_channel[1] = (uint16_t)cycles_per_tick;
+  config_tc.counter_16_bit.compare_capture_channel[0] = (uint16_t)(cycles_per_tick - 1u);
+  config_tc.counter_16_bit.compare_capture_channel[1] = (uint16_t)(cycles_per_tick - 1u);
   tc_init(&tc_instance, TC0, &config_tc);
   tc_enable(&tc_instance);
   tc_register_callback(&tc_instance, tc_callback_sw_timer, TC_CALLBACK_CC_CHANNEL0);
@@ -158,7 +158,7 @@ bool sw_timer_is_elapsed(sw_timer * sw_timer_ptr, uint32_t timeout)
       --Delay;
     }
 
-    if ((Delay > timeout) || (timeout == 0))
+    if ((Delay >= timeout) || (timeout == 0))
     {
       // The timer is stopped or elapsed
       *sw_timer_ptr = 0;

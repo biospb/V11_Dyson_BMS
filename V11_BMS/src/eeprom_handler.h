@@ -66,9 +66,15 @@ struct eeprom_data
 
 extern int eeprom_init(void);
 extern int eeprom_read(void);
-extern bool eeprom_write(void);  /* true = page written, false = stored values already current */
+enum eeprom_write_result {
+  EEPROM_WRITE_FAILED = -1,
+  EEPROM_UNCHANGED = 0,
+  EEPROM_WRITTEN = 1
+};
+extern enum eeprom_write_result eeprom_write(void);
+extern bool eeprom_healthy(void);
 extern int eeprom_fuses_set(void);
-extern void eeprom_write_defaults(void);
+extern enum eeprom_write_result eeprom_write_defaults(void);
 extern bool eeprom_was_reset(void);  /* true if eeprom_init() fell back to defaults */
 
 #endif /* EEPROM_H_ */

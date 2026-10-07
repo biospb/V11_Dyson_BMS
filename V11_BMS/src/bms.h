@@ -45,7 +45,7 @@ enum BMS_STATE
  *
  *   1. The self-recovering faults are 1..BMS_ERR_SHORTCIRCUIT. That split is
  *      what bms_blink_error_code() signals: those are blinked as short pulses
- *      counting 1..4, everything above as long pulses counting 1..6. Pulse
+ *      counting 1..4, everything above as long pulses counting 1..8. Pulse
  *      length gives the class, pulse count gives the code within it, and no
  *      pattern ever mixes the two.
  *
@@ -72,7 +72,9 @@ enum BMS_ERROR_CODE
   BMS_ERR_I2C_FAIL,        //  9  BQ7693 unreachable/corrupt, or the AFE itself
                            //     reported an internal fault (DEVICE_XREADY) or
                            //     an external protector pulled ALERT (OVRD_ALERT)
-  BMS_ERR_WDT,             // 10  Watchdog early warning fired - main loop stalled!
+  BMS_ERR_WDT,            // 10  Watchdog early warning fired - main loop stalled!
+  BMS_ERR_SENSOR_FAIL,    // 11  ADC conversion or initialization failed
+  BMS_ERR_EEPROM_FAIL,    // 12  Persistence failed
 };
 
 /*-----------------------------------------------------------------------------
@@ -95,6 +97,7 @@ enum BMS_ERROR_CODE
  extern void bms_force_fault(enum BMS_ERROR_CODE code);
  extern uint16_t bms_get_soc_x100(void);
  extern uint32_t bms_get_runtime_seconds(void);
+ extern uint32_t bms_get_full_charge_capacity_001mah(void);
  extern void bms_wakeup_interrupt_callback(void);
  extern void bms_interrupt_callback(void) ;
  extern void bms_interrupt_process(void);
