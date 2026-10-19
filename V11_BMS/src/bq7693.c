@@ -8,6 +8,7 @@
 
 
 #include "bq7693.h"
+#include <string.h>
 
 static bool bq7693_i2c_init(void);
 
@@ -17,6 +18,9 @@ static bool bq7693_read_attempt(uint8_t addr, size_t len, uint8_t *buf);
 static bool bq7693_write_attempt(uint8_t addr, uint8_t value);
 
 uint16_t bq7693_cell_voltages[7];
+/* Last complete snapshot, for telemetry only. Never used by protections. */
+static uint16_t bq7693_cached_cells[7];
+static bool bq7693_cached_cells_valid = false;
 
 /* Cleared by bq7693_comm_clear_error(), latched false by any failed transfer. */
 static volatile bool bq7693_comm_ok = true;
@@ -86,6 +90,7 @@ bool bq7693_init(void)
 {
   uint8_t offset_raw, gain1_raw, gain2_raw, trip, sys_stat;
   bq7693_configured = false;
+  bq7693_cached_cells_valid = false;
   if (!bq7693_i2c_init() || !bq7693_write_register(SYS_CTRL2, 0x00))
     return false;
   if (!bq7693_read_register(ADCOFFSET, 1, &offset_raw) ||
@@ -495,6 +500,7 @@ uint16_t *bq7693_get_cell_voltages(void)
   //Voltages for each cell
   //The cells are connected as below on these packs...
   int cellsToRead[] = { 0,1,2,3,5,6,9};
+  bool complete = bq7693_configured;
 
   for (int i=0; i< 7; ++i)
   {
@@ -505,13 +511,27 @@ uint16_t *bq7693_get_cell_voltages(void)
          happened to be on the stack as a cell voltage. Report 0mV instead,
          which fails every safety check, and leave the comm error latched. */
       bq7693_cell_voltages[i] = 0;
+      complete = false;
       continue;
     }
     tempval = ((scratch[0] & 0x3F) <<8) | scratch[1];
     bq7693_cell_voltages[i] = bq7693_vc_to_mv(tempval);
   }
 
+  if (complete)
+  {
+    memcpy(bq7693_cached_cells, bq7693_cell_voltages, sizeof(bq7693_cached_cells));
+    bq7693_cached_cells_valid = true;
+  }
   return bq7693_cell_voltages;
+}
+
+/** @brief Last complete cell snapshot without touching I2C or its latch.
+ * Call from the main loop, like bq7693_get_cell_voltages(). No age guarantee.
+ */
+const uint16_t *bq7693_get_cached_cell_voltages(void)
+{
+  return bq7693_cached_cells_valid ? bq7693_cached_cells : NULL;
 }
 
 /**
@@ -548,21 +568,19 @@ void bq7693_get_all_vc(uint16_t *voltages_out)
 }
 
 /**
- * @brief Read total pack voltage from BQ7693 BAT register.
+ * @brief Sum the last complete cell snapshot, without I2C.
  *
- * @return  Pack voltage in mV.
+ * @return Pack voltage in mV, or -1 before the first complete snapshot.
  */
-int bq7693_get_pack_voltage(void)
+int bq7693_get_cached_pack_voltage(void)
 {
-  uint8_t scratch[2];
-  uint16_t tempval;
-  if (!bq7693_read_register(BAT_HI_BYTE, 2, scratch))
-  {
-    return 0;
-  }
-  tempval = scratch[0] <<8 | scratch[1];
-  int bq7693_pack_voltage = 4 * bq7693_adc_gain * tempval / 1000 + ( 7 * bq7693_adc_offset);
-  return bq7693_pack_voltage;
+  const uint16_t *cells = bq7693_get_cached_cell_voltages();
+  int sum = 0;
+  if (cells == NULL)
+    return -1;
+  for (uint8_t i = 0; i < 7u; ++i)
+    sum += cells[i];
+  return sum;
 }
 
 /**

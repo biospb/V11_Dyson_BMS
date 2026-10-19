@@ -51,12 +51,7 @@ static void bms_fet_off(bool charge);
 #endif
 
 #if SERIAL_DEBUG
-#define BMS_PRINT(...) \
-{ \
-  char _dbg_tmp[DEBUG_MSG_BUFFER_SIZE]; \
-  DEBUG_SNPRINTF(_dbg_tmp, sizeof(_dbg_tmp), __VA_ARGS__); \
-  serial_debug_send_message(_dbg_tmp);  \
-}
+#define BMS_PRINT(...) serial_debug_printf(__VA_ARGS__)
 #else
 #define BMS_PRINT(...)
 #endif
@@ -184,7 +179,7 @@ static int16_t bms_temperature_hottest(void);
 static bool    bms_trigger_active(void);
 static bool    bms_is_safe_to_discharge(void);
 static bool    bms_is_safe_to_charge(void);
-static bool    bms_is_pack_full(void);
+static bool    bms_is_pack_full(bool refresh);
 static bool    bms_in_storage_mode(void);
 static void    bms_handle_idle(void);
 static void    bms_handle_sleep(void);
@@ -495,25 +490,6 @@ static bool bms_charge_fet_on(void)
     return false;
   }
 
-#if SERIAL_DEBUG
-  /*
-   * bq7693_enable_charge() reports whether the WRITE was accepted, not whether
-   * the FET came on: the AFE can ACK the transfer and leave CHG_ON clear, and
-   * it drops the bit itself for a latched fault. Read both registers back so
-   * the log says which of the two happened. Expect CTRL2=0x41 (CC_EN|CHG_ON)
-   * and STAT=0x00.
-   */
-  {
-    uint8_t ctrl2 = 0u;
-    uint8_t stat  = 0u;
-
-    (void)bq7693_read_register(SYS_CTRL2, 1, &ctrl2);
-    (void)bq7693_read_register(SYS_STAT,  1, &stat);
-    BMS_PRINT("BMS:CHG_FET readback CTRL2=0x%02X STAT=0x%02X\r\n",
-              (unsigned)ctrl2, (unsigned)stat);
-  }
-#endif
-
   if (bms_fault_requested || !bq7693_comm_healthy())
   {
     bms_fet_off(true);
@@ -571,7 +547,16 @@ uint16_t bms_get_soc_x100(void)
 
   if (total_pack_capacity >= 100 && current_charge_level > 0)
   {
-    soc = current_charge_level >= total_pack_capacity ? 10000 : (current_charge_level / 100u) * 10000u / (total_pack_capacity / 100u);
+    if (current_charge_level >= total_pack_capacity)
+      soc = 10000;
+    else
+    {
+      /* Two base-100 digits preserve 0.01% without 64-bit division.
+         The validated capacity bound keeps both products within uint32_t. */
+      uint32_t scaled = current_charge_level * 100u;
+      soc = (scaled / total_pack_capacity) * 100u +
+            ((scaled % total_pack_capacity) * 100u) / total_pack_capacity;
+    }
     soc = (soc < 100) ? 100 : soc;
   }
 
@@ -629,6 +614,11 @@ void bms_mainloop(void)
     //-----------------------------------------------------------------------
       case BMS_INIT:
         bms_state = BMS_IDLE;
+        /* Seed telemetry once, even with debug disabled. Later safety reads
+           and wake/top-up checks keep this snapshot current. */
+        (void)bq7693_get_cell_voltages();
+        if (!bq7693_comm_healthy())
+          bms_force_fault(BMS_ERR_I2C_FAIL);
 #if SERIAL_DEBUG || PROT_DEBUG_PRINT
         //Initial debug blurb
         serial_debug_send_message("Dyson V11/V15 BMS After market firmware " FW_GIT_REV "\r\n");
@@ -728,6 +718,20 @@ void bms_mainloop(void)
 /*-----------------------------------------------------------------------------
     DEFINITION OF LOCAL FUNCTIONS
 -----------------------------------------------------------------------------*/
+#if SERIAL_DEBUG
+/** @brief Queue the common charge/discharge status line using cached voltage. */
+static void bms_debug_print_status(const char *state)
+{
+  BMS_PRINT("BMS:%s I:%d mA @ %ld mAH, C:%ld mAH, T:%s%d.%d/%s%d.%d 'C, P:%d mV\r\n",
+            state, abs(current_filt_mA),
+            eeprom_data.current_charge_level / 1000,
+            eeprom_data.total_pack_capacity / 1000,
+            T_SIGN(pack_temperature), T_WHOLE(pack_temperature), T_FRAC(pack_temperature),
+            T_SIGN(pack_temperature_2), T_WHOLE(pack_temperature_2), T_FRAC(pack_temperature_2),
+            bq7693_get_cached_pack_voltage());
+}
+#endif
+
 /*-----------------------------------------------------------------------------
     Passive cell balancing
 -----------------------------------------------------------------------------*/
@@ -945,6 +949,14 @@ static bool bms_balance_overvoltage(void)
 #define bms_balance_tick()         (false)
 #define bms_balance_overvoltage()  (false)
 #endif
+
+/** @brief Stop the charge path, balancing and its indication in that order. */
+static void bms_stop_charging(void)
+{
+  bms_fet_off(true);
+  bms_balance_stop();
+  leds_off();
+}
 
 /** @brief Set bms_error to code only if code is more severe than the current error. */
 static void bms_set_error(enum BMS_ERROR_CODE code)
@@ -1456,10 +1468,25 @@ static int16_t bms_read_temperature(void)
  */
 static bool bms_sample_temperatures(void)
 {
-  pack_temperature   = bms_read_temperature();
-  pack_temperature_2 = NTC_ADC2Temperature(adc_convert_channel(BMS_ADC_CH_TC2));
-  return pack_temperature != NTC_INVALID_TEMPERATURE &&
-         pack_temperature_2 != NTC_INVALID_TEMPERATURE;
+  /* Retry invalid conversions only; a valid hot/cold reading is never
+     discarded. No caller may proceed using an old temperature. */
+  int16_t tc1 = NTC_INVALID_TEMPERATURE;
+  int16_t tc2 = NTC_INVALID_TEMPERATURE;
+  for (uint8_t attempt = 0; attempt < 3u; ++attempt)
+  {
+    if (tc1 == NTC_INVALID_TEMPERATURE)
+      tc1 = bms_read_temperature();
+    if (tc2 == NTC_INVALID_TEMPERATURE)
+      tc2 = NTC_ADC2Temperature(adc_convert_channel(BMS_ADC_CH_TC2));
+    if (tc1 != NTC_INVALID_TEMPERATURE && tc2 != NTC_INVALID_TEMPERATURE)
+    {
+      pack_temperature = tc1;
+      pack_temperature_2 = tc2;
+      return true;
+    }
+    wdt_reset_count();
+  }
+  return false;
 }
 
 /** @brief The higher of the two thermistors, in 0.1C. */
@@ -1746,9 +1773,12 @@ static bool bms_in_storage_mode(void)
  * @brief Check if any cell reached full charge voltage (with hysteresis).
  * @return true if any cell is at/above threshold.
  */
-static bool bms_is_pack_full(void)
+static bool bms_is_pack_full(bool refresh)
 {
-  uint16_t *cell_voltages = bq7693_get_cell_voltages();
+  const uint16_t *cell_voltages = refresh ? bq7693_get_cell_voltages() :
+                                           bq7693_get_cached_cell_voltages();
+  if (cell_voltages == NULL)
+    return false;
   const bool storage = bms_in_storage_mode();
 
   // Use hysteresis: apply the lower release threshold when pack was already
@@ -2133,7 +2163,7 @@ static void bms_handle_vacuum_running(void)
 #if SERIAL_DEBUG
     if(++debug_print_cnt > 5)
     {
-      BMS_PRINT("BMS:VACUUM_RUNNING I:%d mA @ %ld mAH, C:%ld mAH, T:%s%d.%d/%s%d.%d 'C, P:%d mV\r\n", abs(current_filt_mA), (eeprom_data.current_charge_level / 1000), (eeprom_data.total_pack_capacity / 1000), T_SIGN(pack_temperature), T_WHOLE(pack_temperature), T_FRAC(pack_temperature), T_SIGN(pack_temperature_2), T_WHOLE(pack_temperature_2), T_FRAC(pack_temperature_2), bq7693_get_pack_voltage());
+      bms_debug_print_status("VACUUM_RUNNING");
       debug_print_cnt = 0;
     }
 #endif
@@ -2146,8 +2176,10 @@ static void bms_handle_vacuum_running(void)
 /** @brief Fault: display error, retry safety for transient faults, keep protocol alive. */
 static void bms_handle_fault(void)
 {
-  bms_fault_requested = false;
+  system_interrupt_enter_critical_section();
   const enum BMS_ERROR_CODE original_error = bms_error;
+  bms_fault_requested = false;
+  system_interrupt_leave_critical_section();
   /*
    * The self-recovering codes are exactly 1..BMS_ERR_SHORTCIRCUIT - see the
    * enum in bms.h. Deriving it from the ordering rather than listing them
@@ -2162,14 +2194,10 @@ static void bms_handle_fault(void)
 
   BMS_PRINT("BMS:FAULT err=%d auto_recover=%d\r\n", original_error, auto_recover);
 #if SERIAL_DEBUG
-  /* What the pack looked like at the moment it faulted. The safety check names
-     only the cell it tripped on. VCALL and the BQ7693 thermistors used to be
-     dumped here too - both questions are settled (the cell map is correct,
-     TS1/TS2 have nothing connected), so they are boot-only now. */
+  /* Last complete voltage snapshot before the fault; no diagnostic I2C. */
   serial_debug_send_cell_voltages();
-  /* All ten channels, including the three the cell map does not use: a fault
-     is where a wrong map or a disturbed measurement group would show. */
-  serial_debug_send_all_vc();
+  /* Ordinary fault logs use the last-good snapshot. The ten-channel raw
+     diagnostic remains available for deliberate cell-map investigation. */
   bms_debug_dump_temps("fault");
 #endif
 
@@ -2183,9 +2211,7 @@ static void bms_handle_fault(void)
      on its own. */
   bms_trigger_latch_clear();
   bms_fet_off(false);
-  bms_fet_off(true);
-  bms_balance_stop();
-  port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
+  bms_stop_charging();
 
   /* Paces both recovery routes below; the charger route applies to every
      code, so it is started unconditionally. */
@@ -2193,9 +2219,32 @@ static void bms_handle_fault(void)
 
   if (bms_error == BMS_ERR_PACK_DISCHARGED || bms_error == BMS_ERR_UNDERVOLTAGE)
   {
-    eeprom_data.current_charge_level = 0;
-    cc_uah_remainder_q15 = 0;
-    eeprom_data.full_discharge_seen = 1;
+    /* A loaded UV trip can be voltage sag, not an empty pack. Qualify the
+       learning anchor on relaxed cells, after both FETs were switched off. */
+    eeprom_data.full_discharge_seen = 0;
+    sw_timer_delay_ms(1000);
+    bq7693_comm_clear_error();
+    uint16_t *rested = bq7693_get_cell_voltages();
+    if (bq7693_comm_healthy())
+    {
+      bool empty = false;
+      for (uint8_t i = 0; i < 7u; ++i)
+      {
+        if (rested[i] < CELL_IMPLAUSIBLE_VOLTAGE)
+        {
+          empty = false;
+          break;
+        }
+        if (rested[i] < CELL_LOWEST_DISCHARGE_VOLTAGE)
+          empty = true;
+      }
+      eeprom_data.full_discharge_seen = empty;
+    }
+    if (eeprom_data.full_discharge_seen)
+    {
+      eeprom_data.current_charge_level = 0;
+      cc_uah_remainder_q15 = 0;
+    }
   }
 
   /*
@@ -2268,10 +2317,22 @@ static void bms_handle_fault(void)
       if (sw_timer_is_elapsed(&giveup_timer, auto_recover ? FAULT_RECOVER_GIVEUP_MS
                                                           : FAULT_CHARGER_GIVEUP_MS))
       {
-        BMS_PRINT("BMS:FAULT giving up on charger, sleeping\r\n");
+        BMS_PRINT("BMS:FAULT giving up on charger, standby\r\n");
         leds_off();
-        bms_state = BMS_SLEEP;
-        return;
+        /* SHIP may leave REGOUT powered on the dock. Retain the fault and
+           wake on charger/trigger/mode or RTC, without a reset loop. */
+        rtc_standby_timer_start();
+        bms_enter_standby();
+        system_set_sleepmode(SYSTEM_SLEEPMODE_STANDBY);
+        system_interrupt_enter_critical_section();
+        if (dio_read(DIO_CHARGER_CONNECTED) && !bms_wake_event && !rtc_wakeup_flag)
+          system_sleep();
+        system_interrupt_leave_critical_section();
+        bms_leave_standby();
+        rtc_standby_timer_stop();
+        rtc_wakeup_flag = false;
+        sw_timer_start(&giveup_timer);
+        sw_timer_stop(&retry_timer);
       }
 
       if (retry_due)
@@ -2358,7 +2419,7 @@ static void bms_handle_charger_connected(void)
   serial_debug_send_cell_voltages();
 #endif
 
-  if (bms_is_pack_full())
+  if (bms_is_pack_full(true))
   {
     bms_state = BMS_CHARGER_CONNECTED_NOT_CHARGING;
   }
@@ -2495,7 +2556,7 @@ static void bms_handle_charger_connected_not_charging(void)
     {
       sw_timer_start(&recheck_timer);
 
-      if (!bms_is_pack_full())
+      if (!bms_is_pack_full(true))
       {
         BMS_PRINT("BMS:TOP_UP needed\r\n");
         bms_balance_stop();
@@ -2612,7 +2673,7 @@ static void bms_handle_charger_connected_not_charging(void)
       balance_evaluated = !CELL_BALANCE_ENABLE;
 
       // check if pack needs top-up charging on any wakeup
-      if (!bms_is_pack_full())
+      if (!bms_is_pack_full(true))
       {
         bms_balance_stop();
         bms_state = BMS_CHARGER_CONNECTED;
@@ -2645,10 +2706,14 @@ static void bms_handle_charging(void)
   sw_timer noflow_led_timer       = 0;
   bool     noflow_led_on          = false;
   bool     current_flowing_prev   = true;
+  uint8_t  noflow_near_full_windows = 0;
+  uint8_t  noflow_low_samples = 0;
+  bool     taper_complete = false;
 
   //Sanity check...
   if (!bms_is_safe_to_charge())
   {
+    bms_stop_charging();
     bms_state = BMS_FAULT;
     return;
   }
@@ -2663,8 +2728,7 @@ static void bms_handle_charging(void)
   //Enable the charge FET in the BQ7693.
   if (!bms_charge_fet_on())
   {
-    port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-    bms_fet_off(true);
+    bms_stop_charging();
     bms_set_error(BMS_ERR_I2C_FAIL);
     bms_state = BMS_FAULT;
     return;
@@ -2726,6 +2790,8 @@ static void bms_handle_charging(void)
      if (current_flowing)
      {
        sw_timer_start(&noflow_timeout);
+       noflow_near_full_windows = 0;
+       noflow_low_samples = 0;
      }
      else if (sw_timer_is_elapsed(&noflow_timeout, CHARGE_NO_CURRENT_TIMEOUT_MS))
      {
@@ -2738,13 +2804,23 @@ static void bms_handle_charging(void)
         *
         * The hazard this guards against is a pack that cannot fill, sitting on
         * a dock burning what it has left. A pack already at the release
-        * threshold has nothing left to lose, so above it, keep waiting.
+        * threshold can be tapering, so allow a bounded finishing interval.
         *
         * Checked only once the timeout has expired, so the cell read costs
         * nothing in the normal case.
         */
+       bq7693_comm_clear_error();
        uint16_t *v_now   = bq7693_get_cell_voltages();
        uint16_t  v_max   = 0;
+
+       /* Failed reads contain zeroes. Never interpret them as flat cells.
+          Register reads already exhaust three CRC-checked attempts. */
+       if (!bq7693_comm_healthy())
+       {
+         bms_stop_charging();
+         bms_force_fault(BMS_ERR_I2C_FAIL);
+         return;
+       }
 
        for (int i = 0; i < 7; ++i)
        {
@@ -2762,18 +2838,21 @@ static void bms_handle_charging(void)
        const uint16_t v_release = bms_in_storage_mode() ? CELL_STORAGE_RELEASE_VOLTAGE
                                                         : CELL_FULL_CHARGE_RELEASE_VOLTAGE;
 
+       if (v_max < v_release)
+         noflow_near_full_windows = 0;
+
        if (v_max >= v_release)
        {
-         /* Nearly there - keep waiting. No continue: that skipped the safety
-            checks and the loop delay below for the pass. */
+         noflow_low_samples = 0;
+         /* Three five-minute windows of valid near-full taper are enough.
+            Finish through the normal safety/commit path below. */
+         if (++noflow_near_full_windows >= 3u)
+           taper_complete = true;
          sw_timer_start(&noflow_timeout);
        }
-       else
+       else if (++noflow_low_samples >= 3u)
        {
-         port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-         bms_fet_off(true);
-         bms_balance_stop();
-         leds_off();
+         bms_stop_charging();
 
          serial_debug_send_message("BMS:CHARGE_NO_CURRENT timeout, shutting down\r\n");
 #if SERIAL_DEBUG
@@ -2842,8 +2921,7 @@ static void bms_handle_charging(void)
         {
           if (eeprom_write_defaults() == EEPROM_WRITE_FAILED)
           {
-            port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-            bms_fet_off(true);
+            bms_stop_charging();
             bms_force_fault(BMS_ERR_EEPROM_FAIL);
             break;
           }
@@ -2865,21 +2943,14 @@ static void bms_handle_charging(void)
     if (bms_fault_pending())
     {
       /* raised from interrupt context - honour it instead of overwriting it */
-      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-      bms_fet_off(true);
-      bms_balance_stop();
-      leds_off();
+      bms_stop_charging();
       return;
     }
 
     if (!bms_is_safe_to_charge())
     {
       //Safety error.
-      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-      bms_fet_off(true);
-
-      bms_balance_stop();
-      leds_off();
+      bms_stop_charging();
       bms_state = BMS_FAULT;
       return;
     }
@@ -2888,10 +2959,7 @@ static void bms_handle_charging(void)
     //loop re-enables it, so without this the charge just stops.
     if (bms_afe_fet_dropped() && !bms_charge_fet_on())
     {
-      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-      bms_fet_off(true);
-      bms_balance_stop();
-      leds_off();
+      bms_stop_charging();
       bms_set_error(BMS_ERR_I2C_FAIL);
       bms_state = BMS_FAULT;
       return;
@@ -2901,9 +2969,7 @@ static void bms_handle_charging(void)
     {
       //Charger unplugged.
       //Turn off charging
-      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-      bms_fet_off(true);
-      bms_balance_stop();
+      bms_stop_charging();
 
       // Re-enable discharge FET only if a vacuum is currently connected;
       // otherwise leave it to the idle loop's vacuum-connect edge. A failure
@@ -2918,7 +2984,12 @@ static void bms_handle_charging(void)
       return;
     }
 
-    if (bms_is_pack_full())
+    if (taper_complete)
+      charge_pause_counter = FULL_CHARGE_PAUSE_COUNT;
+
+    /* The safety check immediately above just refreshed all seven cells.
+       No services or cell reads run between that check and this verdict. */
+    if (!taper_complete && bms_is_pack_full(false))
     {
       charging_leds_duty = 0;
       leds_off();
@@ -2928,7 +2999,6 @@ static void bms_handle_charging(void)
       debug_print_cnt = 0;
 #endif
       //Pause the charging.
-      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
       bms_fet_off(true);
 
       //Pause, then go and try again. Stepped at 250ms rather
@@ -3014,9 +3084,7 @@ static void bms_handle_charging(void)
         sw_timer_start(&cell_log_timer);
         if (!bms_charge_fet_on())
         {
-          port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-          bms_fet_off(true);
-          leds_off();
+          bms_stop_charging();
           bms_set_error(BMS_ERR_I2C_FAIL);
           bms_state = BMS_FAULT;
           return;
@@ -3035,7 +3103,7 @@ static void bms_handle_charging(void)
        */
       if(++debug_print_cnt > (current_flowing ? 5u : 20u))
       {
-        BMS_PRINT("BMS:CHARGING I:%d mA @ %ld mAH, C:%ld mAH, T:%s%d.%d/%s%d.%d 'C, P:%d mV\r\n", abs(current_filt_mA), (eeprom_data.current_charge_level / 1000), (eeprom_data.total_pack_capacity / 1000), T_SIGN(pack_temperature), T_WHOLE(pack_temperature), T_FRAC(pack_temperature), T_SIGN(pack_temperature_2), T_WHOLE(pack_temperature_2), T_FRAC(pack_temperature_2), bq7693_get_pack_voltage());
+        bms_debug_print_status("CHARGING");
         debug_print_cnt = 0;
       }
 #endif
@@ -3045,10 +3113,7 @@ static void bms_handle_charging(void)
     {
       //After FULL_CHARGE_PAUSE_COUNT pauses, we are full.
       //Disable the charging
-      port_pin_set_output_level(ENABLE_CHARGE_PIN, false);
-      bms_fet_off(true);
-
-      leds_off();
+      bms_stop_charging();
 
       bms_state = BMS_CHARGER_CONNECTED_NOT_CHARGING;
 
@@ -3130,7 +3195,12 @@ static void bms_handle_charger_unplugged(void)
   bms_debug_dump_temps("chg_out");
 
   //Do a little flash to show how out of sync the pack is, then go to idle.
-  uint16_t *cell_voltages = bq7693_get_cell_voltages();
+  const uint16_t *cell_voltages = bq7693_get_cached_cell_voltages();
+  if (cell_voltages == NULL)
+  {
+    bms_state = BMS_IDLE;
+    return;
+  }
 
   uint8_t highest_cell = 0;
   uint8_t lowest_cell = 0;

@@ -67,6 +67,25 @@ extern volatile struct eeprom_data eeprom_data;
     DEFINITION OF GLOBAL FUNCTIONS
 -----------------------------------------------------------------------------*/
 
+/** @brief Format a bounded debug line and queue it without pumping services. */
+void serial_debug_printf(const char *fmt, ...)
+{
+#if SERIAL_DEBUG || PROT_DEBUG_PRINT
+  char message[DEBUG_MSG_BUFFER_SIZE];
+  va_list args;
+  va_start(args, fmt);
+#if TINY_PRINTF_ENABLE
+  tiny_vsnprintf(message, sizeof(message), fmt, args);
+#else
+  vsnprintf(message, sizeof(message), fmt, args);
+#endif
+  va_end(args);
+  serial_debug_send_message(message);
+#else
+  (void)fmt;
+#endif
+}
+
 /**
  * @brief Initialise the debug UART on SERCOM0 at 115200 baud.
  *
@@ -146,26 +165,24 @@ void serial_debug_process(void)
 }
 
 /**
- * @brief Queue individual cell voltages and the pack voltage.
+ * @brief Queue the last complete cell snapshot and its sum, without I2C.
  *
  * Output format: "V: <c0> <c1> … <c6> mV P: <pack> mV\r\n"
  */
 void serial_debug_send_cell_voltages(void)
 {
 #if SERIAL_DEBUG || PROT_DEBUG_PRINT
-  char tmp[30];
-  uint16_t *cell_voltages = bq7693_get_cell_voltages();
-
-  serial_debug_send_message("V:");
-
-  for (int i=0; i<7; ++i)
+  const uint16_t *cell_voltages = bq7693_get_cached_cell_voltages();
+  if (cell_voltages == NULL)
   {
-    DEBUG_SNPRINTF(tmp, sizeof(tmp), " %d", cell_voltages[i]);
-    serial_debug_send_message(tmp);
+    serial_debug_send_message("V: unavailable\r\n");
+    return;
   }
 
-  DEBUG_SNPRINTF(tmp, sizeof(tmp), " mV P: %d mV\r\n", bq7693_get_pack_voltage());
-  serial_debug_send_message(tmp);
+  serial_debug_printf("V: %d %d %d %d %d %d %d mV P: %d mV (cached)\r\n",
+                      cell_voltages[0], cell_voltages[1], cell_voltages[2],
+                      cell_voltages[3], cell_voltages[4], cell_voltages[5],
+                      cell_voltages[6], bq7693_get_cached_pack_voltage());
 #endif
 }
 
@@ -208,9 +225,7 @@ void serial_debug_send_all_vc(void)
 void serial_debug_send_pack_capacity(void)
 {
 #if SERIAL_DEBUG || PROT_DEBUG_PRINT
-  char tmp[30];
-  DEBUG_SNPRINTF(tmp, sizeof(tmp), "C: %ld mAh\r\n", eeprom_data.current_charge_level/1000);
-  serial_debug_send_message(tmp);
+  serial_debug_printf("C: %ld mAh\r\n", eeprom_data.current_charge_level / 1000);
 #endif
 }
 

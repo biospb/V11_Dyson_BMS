@@ -141,18 +141,25 @@ int eeprom_read(void)
   }
 
   if (eeprom_data.total_pack_capacity <= 0 ||
-      eeprom_data.total_pack_capacity > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH ||
       eeprom_data.current_charge_level < 0 ||
-      eeprom_data.current_charge_level > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH ||
-      eeprom_data.full_discharge_seen > 1 ||
-      eeprom_data.idle_wakes > STORAGE_IDLE_WAKES)
+      eeprom_data.full_discharge_seen > 1)
     return -1;
 
+  /* Save the actual flash contents before applying current policy bounds,
+     so a later commit will persist the normalized values. */
+  eeprom_shadow = eeprom_data;
+
+  if (eeprom_data.total_pack_capacity > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH)
+    eeprom_data.total_pack_capacity = PACK_CAPACITY_UPPER_BOUND_UAH;
+  if (eeprom_data.current_charge_level > (int32_t)PACK_CAPACITY_UPPER_BOUND_UAH)
+    eeprom_data.current_charge_level = PACK_CAPACITY_UPPER_BOUND_UAH;
+
+  /* This counter saturates at a firmware policy limit, not a layout limit.
+     A changed storage schedule must not discard a CRC-valid learned gauge. */
+  if (eeprom_data.idle_wakes > STORAGE_IDLE_WAKES)
+    eeprom_data.idle_wakes = STORAGE_IDLE_WAKES;
+
   //What we just read is, by definition, what is stored.
-  eeprom_shadow.total_pack_capacity  = eeprom_data.total_pack_capacity;
-  eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
-  eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
-  eeprom_shadow.idle_wakes           = eeprom_data.idle_wakes;
   eeprom_shadow_valid = true;
   eeprom_ok = true;
   eeprom_data_valid = true;
@@ -219,8 +226,16 @@ enum eeprom_write_result eeprom_write(void)
 
   uint8_t buffer[EEPROM_PAGE_SIZE] = {0};
   memcpy(buffer, (const void*)&eeprom_data, sizeof(eeprom_data));
-  if (eeprom_emulator_write_page(0, buffer) != STATUS_OK ||
-      eeprom_emulator_commit_page_buffer() != STATUS_OK)
+  bool written = false;
+  uint8_t verify[EEPROM_PAGE_SIZE];
+  for (uint8_t attempt = 0; attempt < 3u && !written; ++attempt)
+  {
+    written = eeprom_emulator_write_page(0, buffer) == STATUS_OK &&
+              eeprom_emulator_commit_page_buffer() == STATUS_OK &&
+              eeprom_emulator_read_page(0, verify) == STATUS_OK &&
+              memcmp(buffer, verify, sizeof(buffer)) == 0;
+  }
+  if (!written)
   {
     eeprom_ok = false;
     eeprom_shadow_valid = false;

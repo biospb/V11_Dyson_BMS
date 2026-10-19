@@ -43,12 +43,7 @@
 
 #if PROT_DEBUG_PRINT
 #include "serial_debug.h"
-#define DSN_PRINT(...) \
-  { \
-    char _dbg_tmp[DEBUG_MSG_BUFFER_SIZE]; \
-    DEBUG_SNPRINTF(_dbg_tmp, sizeof(_dbg_tmp), __VA_ARGS__); \
-    serial_debug_send_message(_dbg_tmp);  \
-  }
+#define DSN_PRINT(...) serial_debug_printf(__VA_ARGS__)
 #else
   #define DSN_PRINT(...)
 #endif
@@ -213,10 +208,6 @@ static uint8_t  frame_compute_hdr_crc8(const uint8_t *buf);
 
 static bool     rx_byte_handler(uint8_t ch);
 static bool     process_rx_frame(void);
-static uint16_t tlv_cell_voltages[HANDSHAKE_NUM_CELLS];
-static bool tlv_cells_loaded;
-static bool tlv_cells_valid;
-static bool load_tlv_cell_voltages(void);
 static uint16_t analyze_frame(proc_ctx_t *ctx, uint8_t req_class);
 static bool     dispatch_pair(proc_ctx_t *in_ctx, uint16_t pair, uint8_t *out_data, uint16_t out_size, uint16_t *out_len);
 static bool     dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len);
@@ -730,8 +721,6 @@ static bool process_rx_frame(void)
   handshake_key_seen = false;
 
   // Run the TLV frame analyzer
-  tlv_cells_loaded = false;
-  tlv_cells_valid = false;
   resp_payload_len = analyze_frame(&ctx, req_class);
 
   // Complete handshake when the startup-only key (TLV_MAX_PACK_V) was queried
@@ -1008,25 +997,11 @@ static bool dispatch_pair(proc_ctx_t *in_ctx, uint16_t pair, uint8_t *out_data, 
  * @brief  TLV register dispatcher: map (TYPE<<8)|REG keys to BMS sensor values.
  * @return true if key known.
  */
-static bool load_tlv_cell_voltages(void)
-{
-  if (!tlv_cells_loaded)
-  {
-    tlv_cells_loaded = true;
-    uint16_t *cells = bq7693_get_cell_voltages();
-    if (!bq7693_comm_healthy())
-      bms_force_fault(BMS_ERR_I2C_FAIL);
-    else
-    {
-      memcpy(tlv_cell_voltages, cells, sizeof(tlv_cell_voltages));
-      tlv_cells_valid = true;
-    }
-  }
-  return tlv_cells_valid;
-}
-
 static bool dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len)
 {
+  /* Frame analysis does not pump services or read cells: every TLV sees the
+     same last-good snapshot, with no I2C and no duplicate RAM buffer. */
+  const uint16_t *tlv_cell_voltages = bq7693_get_cached_cell_voltages();
   uint16_t soc;
   uint16_t val;
   uint32_t val32;
@@ -1034,7 +1009,7 @@ static bool dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len
   *out_len = 0;
   if (key >= TLV_CELL_V_FIRST && key <= TLV_CELL_V_LAST)
   {
-    if (!load_tlv_cell_voltages())
+    if (tlv_cell_voltages == NULL)
       return false;
     HTOLE16(out_data, tlv_cell_voltages[key - TLV_CELL_V_FIRST]);
     *out_len = 2;
@@ -1080,7 +1055,7 @@ static bool dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len
       return true;
 
     case TLV_MAX_CELL_V:  // 0x250B: max cell voltage mV
-      if (!load_tlv_cell_voltages())
+      if (tlv_cell_voltages == NULL)
         return false;
       val = tlv_cell_voltages[0];
       for (uint8_t i = 1; i < HANDSHAKE_NUM_CELLS; i++)
@@ -1091,7 +1066,7 @@ static bool dispatch_tlv_read(uint16_t key, uint8_t *out_data, uint16_t *out_len
       return true;
 
     case TLV_MIN_CELL_V:  // 0x250C: min cell voltage mV
-      if (!load_tlv_cell_voltages())
+      if (tlv_cell_voltages == NULL)
         return false;
       val = tlv_cell_voltages[0];
       for (uint8_t i = 1; i < HANDSHAKE_NUM_CELLS; i++)

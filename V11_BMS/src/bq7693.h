@@ -86,8 +86,12 @@ void bq7693_comm_clear_error(void);
 bool bq7693_comm_healthy(void);
 
 uint16_t* bq7693_get_cell_voltages(void);
+/* Main-loop telemetry only: seven values from the last complete read, no I2C.
+   NULL until populated; unchanged on failure, replaced by the next good read.
+   Consume before calling services or making another fresh cell read. */
+const uint16_t *bq7693_get_cached_cell_voltages(void);
 extern void bq7693_get_all_vc(uint16_t *voltages_out);  /* 10 entries, VC1..VC10 */
-int bq7693_get_pack_voltage(void);
+int bq7693_get_cached_pack_voltage(void);
 /* Return false if the FET could not be driven - see bq7693_enable_charge(). */
 bool bq7693_enable_charge(void);
 bool bq7693_enable_discharge(void);
