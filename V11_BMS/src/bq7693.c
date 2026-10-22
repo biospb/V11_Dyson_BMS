@@ -656,22 +656,43 @@ static const uint8_t cb_conflict[BQ7693_NUM_CELLS] =
 static uint8_t bq7693_balance_latch = 0;
 
 /**
- * @brief Write both balance registers directly.
+ * @brief Write both balance registers and read them back.
+ *
+ * Both registers are always written, even if the first write fails, so that a
+ * request to turn balancing off clears as much as it can. A failed write leaves
+ * the previous bits in place, and those bits keep bleeding the cell with nothing
+ * supervising them - so the caller has to know.
  *
  * @param cellbal1  CB5..CB1 in bits 4..0.
  * @param cellbal2  CB10..CB6 in bits 4..0.
+ * @return          true if both registers now read back as requested.
  */
-void bq7693_set_balancing(uint8_t cellbal1, uint8_t cellbal2)
+bool bq7693_set_balancing(uint8_t cellbal1, uint8_t cellbal2)
 {
-  bq7693_write_register(CELLBAL1, cellbal1 & 0x1F);
-  bq7693_write_register(CELLBAL2, cellbal2 & 0x1F);
+  uint8_t rb1 = 0xFF;
+  uint8_t rb2 = 0xFF;
+  bool    ok;
+
+  cellbal1 &= 0x1F;
+  cellbal2 &= 0x1F;
+
+  ok = bq7693_write_register(CELLBAL1, cellbal1);
+  ok = bq7693_write_register(CELLBAL2, cellbal2) && ok;
+
+  if (!ok || !bq7693_read_register(CELLBAL1, 1, &rb1) || !bq7693_read_register(CELLBAL2, 1, &rb2))
+    return false;
+
+  return ((rb1 & 0x1F) == cellbal1) && ((rb2 & 0x1F) == cellbal2);
 }
 
-/** @brief Turn every balance channel off and drop the hysteresis latch. */
-void bq7693_disable_balancing(void)
+/**
+ * @brief Turn every balance channel off and drop the hysteresis latch.
+ * @return true if both registers read back as zero.
+ */
+bool bq7693_disable_balancing(void)
 {
   bq7693_balance_latch = 0;
-  bq7693_set_balancing(0x00, 0x00);
+  return bq7693_set_balancing(0x00, 0x00);
 }
 
 /**
@@ -689,8 +710,11 @@ void bq7693_disable_balancing(void)
  * relaxed - under charge the measured spread is mostly IR drop.
  *
  * @param status  Filled in with the resulting decision. Must not be NULL.
+ * @return        true if CELLBAL1/2 were written and read back as decided.
+ *                false means the channels may not match the decision -
+ *                including bits from an earlier pass still bleeding.
  */
-void bq7693_balance_update(bq7693_balance_status_t *status)
+bool bq7693_balance_update(bq7693_balance_status_t *status)
 {
   uint16_t *v;
 
@@ -712,10 +736,10 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
 
   if (!bq7693_comm_healthy())
   {
-    bq7693_disable_balancing();
+    (void)bq7693_disable_balancing();
     status->cell_mask = 0;
     status->num_cells = 0;
-    return;
+    return false;
   }
 
   uint16_t  v_min = 0xFFFF;
@@ -757,16 +781,18 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
   {
     uint8_t bit = (uint8_t)(1u << cb_bit[max_cell]);
 
+    bool ok;
+
     bq7693_balance_latch = (uint8_t)(1u << max_cell);
     if (cb_reg[max_cell] == CELLBAL1)
-      bq7693_set_balancing(bit, 0x00);
+      ok = bq7693_set_balancing(bit, 0x00);
     else
-      bq7693_set_balancing(0x00, bit);
+      ok = bq7693_set_balancing(0x00, bit);
 
     status->cell_mask = (uint8_t)(1u << max_cell);
     status->num_cells = 1;
     status->state     = BQ_BALANCE_OV;
-    return;
+    return ok;
   }
 
   // Not near the top of charge yet - cell voltage does not track SOC well
@@ -774,9 +800,8 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
   // weak cell cannot lock balancing out forever.
   if (v_max < CELL_BALANCE_MIN_CELL_MV)
   {
-    bq7693_disable_balancing();
     status->state = BQ_BALANCE_TOO_LOW;
-    return;
+    return bq7693_disable_balancing();
   }
 
   // One cell will not charge up to meet the others. This is a failing cell, not
@@ -784,17 +809,15 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
   // pack's energy as heat and achieve nothing. Refuse and report it.
   if (status->spread_mv > CELL_BALANCE_MAX_SPREAD_MV)
   {
-    bq7693_disable_balancing();
     status->state = BQ_BALANCE_CELL_FAIL;
-    return;
+    return bq7693_disable_balancing();
   }
 
   // Close enough - done.
   if (status->spread_mv <= CELL_BALANCE_TARGET_SPREAD_MV)
   {
-    bq7693_disable_balancing();
     status->state = BQ_BALANCE_IDLE;
-    return;
+    return bq7693_disable_balancing();
   }
 
   // --- selection: highest cell first, then next highest, honouring conflicts -
@@ -841,11 +864,12 @@ void bq7693_balance_update(bq7693_balance_status_t *status)
   }
 
   bq7693_balance_latch = selected;
-  bq7693_set_balancing(reg1, reg2);
 
   status->cell_mask = selected;
   status->num_cells = n;
   status->state     = (n > 0) ? BQ_BALANCE_ACTIVE : BQ_BALANCE_IDLE;
+
+  return bq7693_set_balancing(reg1, reg2);
 }
 
 #endif /* CELL_BALANCE_ENABLE */

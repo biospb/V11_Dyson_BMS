@@ -132,9 +132,9 @@ typedef struct
   uint8_t  num_cells;    // popcount of cell_mask
 } bq7693_balance_status_t;
 
-void bq7693_set_balancing(uint8_t cellbal1, uint8_t cellbal2);
-void bq7693_disable_balancing(void);
-void bq7693_balance_update(bq7693_balance_status_t *status);
+bool bq7693_set_balancing(uint8_t cellbal1, uint8_t cellbal2);
+bool bq7693_disable_balancing(void);
+bool bq7693_balance_update(bq7693_balance_status_t *status);
 
 #endif /* CELL_BALANCE_ENABLE */
 

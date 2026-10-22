@@ -400,6 +400,11 @@
 // period above.
 #define CELL_BALANCE_SETTLE_MS              1000
 
+// CELLBAL writes that may fail to read back in a row before the pack faults
+// with BMS_ERR_I2C_FAIL. Each miss is retried on the next balancing tick, or
+// on the next 250ms pass before standby.
+#define CELL_BALANCE_HW_FAIL_LIMIT          3
+
 // Let cells relax this long after the charge FET opens before trusting the
 // measured spread - under charge, IR drop and surface charge dominate it.
 #define CELL_BALANCE_RELAX_MS               20000

@@ -744,11 +744,21 @@ static uint8_t                 bms_balance_last_mask  = 0;
 static bq7693_balance_state_t  bms_balance_last_state = BQ_BALANCE_IDLE;
 /* Bleeding is paused ahead of each decision - see CELL_BALANCE_SETTLE_MS. */
 static bool                    bms_balance_settling   = false;
+/* Consecutive CELLBAL writes that did not read back - see bms_balance_hw_result(). */
+static uint8_t                 bms_balance_hw_fails   = 0;
 
-/** @brief Turn balancing off and re-arm the tick so the next call evaluates immediately. */
-static void bms_balance_stop(void)
+/**
+ * @brief Turn balancing off and re-arm the tick so the next call evaluates immediately.
+ * @return true if CELLBAL1/2 read back as zero. false means a cell may still be
+ *         bleeding, and nothing must go to sleep on the assumption that it is not.
+ */
+static bool bms_balance_stop(void)
 {
-  bq7693_disable_balancing();
+  const bool off = bq7693_disable_balancing();
+
+  if (!off)
+    BMS_PRINT("BMS:BAL_STOP_UNVERIFIED\r\n");
+
   bms_balance_status.state = BQ_BALANCE_IDLE;
   bms_balance_status.cell_mask = 0;
   bms_balance_last_mask    = 0;
@@ -761,6 +771,42 @@ static void bms_balance_stop(void)
   //alternation being left lit on the way out to BMS_IDLE.
   sw_timer_stop(&bms_balance_led_timer);
   leds_off();
+
+  return off;
+}
+
+/**
+ * @brief Count CELLBAL writes that did not read back, and fault if they keep failing.
+ *
+ * One miss is retried on the next tick. A bus that keeps refusing means the
+ * firmware no longer knows which cells are bleeding, and that is an I2C fault.
+ *
+ * @param ok  result of the CELLBAL write just made.
+ */
+static void bms_balance_hw_result(bool ok)
+{
+  if (ok)
+  {
+    bms_balance_hw_fails = 0;
+    return;
+  }
+
+  if (bms_balance_hw_fails < 0xFFu)
+    bms_balance_hw_fails++;
+  BMS_PRINT("BMS:BAL_WRITE_FAIL n=%u\r\n", bms_balance_hw_fails);
+
+  if (bms_balance_hw_fails >= CELL_BALANCE_HW_FAIL_LIMIT)
+  {
+    bms_balance_hw_fails = 0;
+    bms_force_fault(BMS_ERR_I2C_FAIL);
+  }
+}
+
+/** @brief True while the balancer has a channel on: a normal bleed, or the OV-guard bleed. */
+static bool bms_balance_bleeding(void)
+{
+  return (bms_balance_status.state == BQ_BALANCE_ACTIVE)
+      || (bms_balance_status.state == BQ_BALANCE_OV);
 }
 
 /**
@@ -770,11 +816,14 @@ static void bms_balance_stop(void)
  * settle - while charging, the measured spread is mostly IR drop across the cell
  * interconnects and the balancer would chase noise.
  *
- * @return true while one or more cells are actively bleeding.
+ * @return true while one or more cells are bleeding (ACTIVE or OV), or while
+ *         the CELLBAL registers could not be confirmed - either way the caller
+ *         must not go to standby.
  */
 static bool bms_balance_tick(void)
 {
-  const bool active = (bms_balance_status.state == BQ_BALANCE_ACTIVE);
+  const bool active = bms_balance_bleeding();
+  bool       hw_ok;
 
   /*
    * A cell reads about 10mV high while it is being bled, measured on the
@@ -798,10 +847,14 @@ static bool bms_balance_tick(void)
 
     if (bms_balance_status.cell_mask != 0u)
     {
-      bq7693_set_balancing(0x00, 0x00);
-      bms_balance_settling = true;
+      //A failed clear here would judge the pack on readings taken mid-bleed.
+      //Skip this decision and try again next period.
+      hw_ok = bq7693_set_balancing(0x00, 0x00);
+      bms_balance_hw_result(hw_ok);
       sw_timer_start(&bms_balance_timer);
-      return active;
+      if (hw_ok)
+        bms_balance_settling = true;
+      return true;
     }
   }
 
@@ -819,15 +872,17 @@ static bool bms_balance_tick(void)
 
   if ((bms_temperature_hottest() / 10) >= CELL_BALANCE_MAX_TEMP)
   {
-    bq7693_disable_balancing();
+    hw_ok = bq7693_disable_balancing();
     bms_balance_status.state     = BQ_BALANCE_TOO_HOT;
     bms_balance_status.cell_mask = 0;
     bms_balance_status.num_cells = 0;
   }
   else
   {
-    bq7693_balance_update(&bms_balance_status);
+    hw_ok = bq7693_balance_update(&bms_balance_status);
   }
+
+  bms_balance_hw_result(hw_ok);
 
   // Only log on a change, otherwise a multi-hour balance floods the debug queue.
   if (   bms_balance_status.state     != bms_balance_last_state
@@ -873,7 +928,9 @@ static bool bms_balance_tick(void)
     bms_balance_last_mask  = bms_balance_status.cell_mask;
   }
 
-  return (bms_balance_status.state == BQ_BALANCE_ACTIVE);
+  //Channels that could not be confirmed may still be bleeding: hold standby
+  //off until a write reads back, or bms_balance_hw_result() faults.
+  return !hw_ok || bms_balance_bleeding();
 }
 
 /**
@@ -944,7 +1001,8 @@ static bool bms_balance_overvoltage(void)
 }
 
 #else /* !CELL_BALANCE_ENABLE */
-#define bms_balance_stop()         do { } while (0)
+static inline bool bms_balance_stop(void) { return true; }
+static inline void bms_balance_hw_result(bool ok) { (void)ok; }
 #define bms_balance_leds()         do { } while (0)
 #define bms_balance_tick()         (false)
 #define bms_balance_overvoltage()  (false)
@@ -1963,7 +2021,10 @@ static void bms_handle_sleep(void)
   serial_debug_send_message("BMS:GOING_TO_SLEEP\r\n");
   //CELLBAL must be cleared before SHIP mode - the BQ7693 re-enters NORMAL with
   //balancing off, but leaving bits set here would bleed cells on the way down.
-  bms_balance_stop();
+  //One retry, then go anyway: SHIP powers the AFE down, which ends any bleed,
+  //and staying awake on a bus that refuses writes would not.
+  if (!bms_balance_stop() && !bms_balance_stop())
+    serial_debug_send_message("BMS:SHIP with CELLBAL unverified\r\n");
   bms_fet_off(true);
   bms_fet_off(false);
 
@@ -2318,6 +2379,10 @@ static void bms_handle_fault(void)
                                                           : FAULT_CHARGER_GIVEUP_MS))
       {
         BMS_PRINT("BMS:FAULT giving up on charger, standby\r\n");
+        //Balancing was stopped on entry to this state; make sure of it before
+        //sleeping for days. Nothing more to do if the bus refuses - the pack
+        //is already in fault.
+        (void)bms_balance_stop();
         leds_off();
         /* SHIP may leave REGOUT powered on the dock. Retain the fault and
            wake on charger/trigger/mode or RTC, without a reset loop. */
@@ -2592,6 +2657,26 @@ static void bms_handle_charger_connected_not_charging(void)
         //the balance current, and the alternative is balancing never running.
         sw_timer_delay_ms(250);
         continue;
+      }
+
+      //Standby leaves the AFE running and CELLBAL with it, for days until the
+      //next RTC wake, with nothing supervising a channel left on. Clear it and
+      //confirm before sleeping; bms_balance_hw_result() faults a bus that will
+      //not take the write.
+      {
+        const bool off = bms_balance_stop();
+
+        bms_balance_hw_result(off);
+        if (bms_fault_pending())
+        {
+          leds_off();
+          return;
+        }
+        if (!off)
+        {
+          sw_timer_delay_ms(250);
+          continue;
+        }
       }
 
       rtc_standby_timer_start();
