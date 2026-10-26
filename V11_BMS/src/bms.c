@@ -614,9 +614,11 @@ void bms_mainloop(void)
     //-----------------------------------------------------------------------
       case BMS_INIT:
         bms_state = BMS_IDLE;
-        /* Seed telemetry once, even with debug disabled. Later safety reads
-           and wake/top-up checks keep this snapshot current. */
-        (void)bq7693_get_cell_voltages();
+        /* Seed telemetry once, even with debug disabled. Later safety reads,
+           the idle refresh and wake/top-up checks keep this snapshot current.
+           bq7693_init() has already waited out the first conversion (see
+           BQ7693_ADC_SETTLE_MS). */
+        (void)bq7693_get_cell_voltages(true);
         if (!bq7693_comm_healthy())
           bms_force_fault(BMS_ERR_I2C_FAIL);
 #if SERIAL_DEBUG || PROT_DEBUG_PRINT
@@ -1031,6 +1033,16 @@ static void bms_set_error(enum BMS_ERROR_CODE code)
 static bool     bms_trigger_latched     = false;
 static sw_timer bms_trigger_latch_timer = 0;
 
+/*
+ * Edge-detector state. Also file scope: the trigger is not sampled while
+ * docked or faulted, so a press or release there is never seen. Without a
+ * resync, the first sample afterwards compares against a level from before
+ * the dock and reads a press-and-release on the dock as a tap, which sets the
+ * latch and starts the motor once the charger is gone.
+ */
+static uint8_t  bms_trigger_prev_level  = 0;
+static bool     bms_trigger_was_long    = false;
+
 /** @brief Set or clear the latch, starting TRIGGER_LATCH_MAX_MS as it is set. */
 static void bms_trigger_latch_set(bool on)
 {
@@ -1041,10 +1053,17 @@ static void bms_trigger_latch_set(bool on)
   bms_trigger_latched = on;
 }
 
-/** @brief Drop the latch, so nothing restarts the motor without a new press. */
+/**
+ * @brief Drop the latch and resync the edge detector to the pin as it is now,
+ *        so nothing restarts the motor without a new press. A trigger held
+ *        right now does not count as a press, and its release is treated as
+ *        the end of a long press (clears, never toggles).
+ */
 static void bms_trigger_latch_clear(void)
 {
-  bms_trigger_latched = false;
+  bms_trigger_latched    = false;
+  bms_trigger_prev_level = dio_read(DIO_TRIGGER_PRESSED);
+  bms_trigger_was_long   = true;
 }
 
 /**
@@ -1066,7 +1085,7 @@ static void bms_trigger_latch_expire(void)
 {
   if (!dsn_prot_get_vacuum_connected() || dio_read(DIO_CHARGER_CONNECTED))
   {
-    bms_trigger_latched = false;
+    bms_trigger_latch_clear();
   }
   else if (bms_trigger_latched
            && sw_timer_is_elapsed(&bms_trigger_latch_timer, TRIGGER_LATCH_MAX_MS))
@@ -1083,12 +1102,13 @@ static void bms_trigger_latch_expire(void)
 static bool bms_trigger_active(void)
 {
 #if (TRIGGER_TOGGLE_MODE == 1)
-  static uint8_t  prev_level = 0;
   static sw_timer held_timer = 0;
 
-  uint8_t level = dio_read(DIO_TRIGGER_PRESSED);
-
+  /* expire first: it may resync bms_trigger_prev_level to the pin */
   bms_trigger_latch_expire();
+
+  uint8_t level      = dio_read(DIO_TRIGGER_PRESSED);
+  uint8_t prev_level = bms_trigger_prev_level;
 
   if (level && !prev_level) // rising edge
   {
@@ -1100,7 +1120,7 @@ static bool bms_trigger_active(void)
     if (bms_trigger_latched && sw_timer_is_elapsed(&held_timer, TRIGGER_HOLD_MS))
       bms_trigger_latch_set(false);
   }
-  prev_level = level;
+  bms_trigger_prev_level = level;
 
   return bms_trigger_latched;
 
@@ -1120,31 +1140,31 @@ static bool bms_trigger_active(void)
    *                 press the way out of a latch that was set by accident -
    *                 the same gesture whether or not you remember the state.
    */
-  static bool     was_long   = false;
-  static uint8_t  prev_level = 0;
   static sw_timer held_timer = 0;
 
-  uint8_t level = dio_read(DIO_TRIGGER_PRESSED);
-
+  /* expire first: it may resync the edge state to the pin */
   bms_trigger_latch_expire();
+
+  uint8_t level      = dio_read(DIO_TRIGGER_PRESSED);
+  uint8_t prev_level = bms_trigger_prev_level;
 
   if (level && !prev_level)          /* pressed */
   {
     sw_timer_start(&held_timer);
-    was_long = false;
+    bms_trigger_was_long = false;
   }
   else if (!level && prev_level)     /* released */
   {
-    bms_trigger_latch_set(was_long ? false : !bms_trigger_latched);
+    bms_trigger_latch_set(bms_trigger_was_long ? false : !bms_trigger_latched);
   }
   else if (level)                    /* still held */
   {
     if (sw_timer_is_elapsed(&held_timer, TRIGGER_HOLD_MS))
     {
-      was_long = true;
+      bms_trigger_was_long = true;
     }
   }
-  prev_level = level;
+  bms_trigger_prev_level = level;
 
   return (bms_trigger_latched || (level != 0u));
 
@@ -1585,7 +1605,7 @@ static bool bms_is_safe_to_discharge(void)
   }
   bq7693_comm_clear_error();
 
-  uint16_t *cell_voltages = bq7693_get_cell_voltages();
+  const uint16_t *cell_voltages = bq7693_get_cell_voltages(true);
   //Check any cells undervolt.
   for (int i=0; i<7;++i)
   {
@@ -1709,7 +1729,7 @@ static bool bms_is_safe_to_charge(void)
   }
   bq7693_comm_clear_error();
 
-  uint16_t *cell_voltages = bq7693_get_cell_voltages();
+  const uint16_t *cell_voltages = bq7693_get_cell_voltages(true);
 
   //Check no cells are so flat they cannot be charged.
   for (int i=0; i<7;++i)
@@ -1833,7 +1853,7 @@ static bool bms_in_storage_mode(void)
  */
 static bool bms_is_pack_full(bool refresh)
 {
-  const uint16_t *cell_voltages = refresh ? bq7693_get_cell_voltages() :
+  const uint16_t *cell_voltages = refresh ? bq7693_get_cell_voltages(false) :
                                            bq7693_get_cached_cell_voltages();
   if (cell_voltages == NULL)
     return false;
@@ -1873,6 +1893,10 @@ static void bms_handle_idle(void)
   bool debug_grace_used     = false;
   sw_timer dsg_retry_timer  = 0;    // never started, so the first pass is immediate
 
+  /* every way in - undock, fault dismissed, auto-recovery - starts with no
+     latch and an edge detector synced to the pin as it is now */
+  bms_trigger_latch_clear();
+
   /*
    * Outer loop so the idle period can be granted a second time. The check has
    * to live out here: inside the body it could never fire, because the 50ms
@@ -1887,6 +1911,12 @@ static void bms_handle_idle(void)
   {
     bool vacuum_connected = dsn_prot_get_vacuum_connected();
     bool trigger_pressed  = bms_trigger_active();
+
+    /* Keep the cell snapshot current for the log and the DSN telemetry. No
+       safety check runs here without a vacuum edge, so nothing else would
+       refresh it. A failed read keeps the old snapshot; the next safety
+       check clears the comm latch before its own reads. */
+    bq7693_refresh_cells_if_stale();
 
     /*
      * Discharge is armed, and an AFE event has been latched since. The AFE
@@ -2285,7 +2315,7 @@ static void bms_handle_fault(void)
     eeprom_data.full_discharge_seen = 0;
     sw_timer_delay_ms(1000);
     bq7693_comm_clear_error();
-    uint16_t *rested = bq7693_get_cell_voltages();
+    const uint16_t *rested = bq7693_get_cell_voltages(true);
     if (bq7693_comm_healthy())
     {
       bool empty = false;
@@ -2342,6 +2372,7 @@ static void bms_handle_fault(void)
     }
     sw_timer_delay_ms(FAULT_BLINK_REPEAT_MS);
     wdt_reset_count();
+    bq7693_refresh_cells_if_stale();   // keep the logged/reported cells current
 
     const bool charger   = dio_read(DIO_CHARGER_CONNECTED);
     const bool retry_due = sw_timer_is_elapsed(&retry_timer, FAULT_RETRY_MS);
@@ -2525,6 +2556,10 @@ static void bms_handle_charger_connected_not_charging(void)
 
   while(1)
   {
+    /* telemetry and the cell log read the snapshot; balancing and the top-up
+       recheck are the only other readers here, and either can be idle */
+    bq7693_refresh_cells_if_stale();
+
 #if SERIAL_DEBUG
     /*
      * This state printed nothing at all, and a pack spends most of its life
@@ -2895,7 +2930,7 @@ static void bms_handle_charging(void)
         * nothing in the normal case.
         */
        bq7693_comm_clear_error();
-       uint16_t *v_now   = bq7693_get_cell_voltages();
+       const uint16_t *v_now = bq7693_get_cell_voltages(false);
        uint16_t  v_max   = 0;
 
        /* Failed reads contain zeroes. Never interpret them as flat cells.
@@ -3280,8 +3315,11 @@ static void bms_handle_charger_unplugged(void)
   bms_debug_dump_temps("chg_out");
 
   //Do a little flash to show how out of sync the pack is, then go to idle.
-  const uint16_t *cell_voltages = bq7693_get_cached_cell_voltages();
-  if (cell_voltages == NULL)
+  //Read rather than take the snapshot: coming straight out of standby it can
+  //be from before the sleep. Reused if the charge loop just read the cells.
+  bq7693_comm_clear_error();
+  const uint16_t *cell_voltages = bq7693_get_cell_voltages(false);
+  if (!bq7693_comm_healthy())
   {
     bms_state = BMS_IDLE;
     return;
@@ -3428,6 +3466,10 @@ static void bms_leave_standby(void)
   extint_chan_disable_callback(6, EXTINT_CALLBACK_TYPE_DETECT);  // CHARGER_CONNECTED_PIN  EXTINT 6 - PA06
   // enable alert callback
   extint_chan_enable_callback(8, EXTINT_CALLBACK_TYPE_DETECT);
+
+  /* the tick counter did not run in standby: without this a snapshot from
+     before a two-day sleep would pass for a few milliseconds old */
+  bq7693_cells_mark_stale();
 
   bms_wdt_init();
 }

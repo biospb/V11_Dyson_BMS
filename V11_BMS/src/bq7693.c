@@ -8,6 +8,7 @@
 
 
 #include "bq7693.h"
+#include "sw_timer.h"
 #include <string.h>
 
 static bool bq7693_i2c_init(void);
@@ -20,7 +21,20 @@ static bool bq7693_write_attempt(uint8_t addr, uint8_t value);
 uint16_t bq7693_cell_voltages[7];
 /* Last complete snapshot, for telemetry only. Never used by protections. */
 static uint16_t bq7693_cached_cells[7];
-static bool bq7693_cached_cells_valid = false;
+/* Sum of the snapshot, stored with it. 0 = no snapshot: only complete,
+   converted reads are stored, and a 0mV pack is never a real reading. */
+static uint16_t bq7693_cached_pack_mv = 0;
+/*
+ * Tick of the last bus read of the cells; 0 = stale (the tick counter starts
+ * at 1 and skips 0). A complete read stamps "now", so the snapshot may be
+ * reused for BQ7693_CELL_REUSE_MS. A failed read stamps "now" backdated past
+ * that window: never reused, but still an attempt, so the stale refresh
+ * retries a dead bus every BQ7693_CELL_MAX_AGE_MS, not every loop pass.
+ * Read with sw_timer_get_elapsed_time(), never sw_timer_is_elapsed(): that
+ * one zeroes the stamp when it fires, and this one is checked against two
+ * limits.
+ */
+static sw_timer bq7693_cells_time = 0;
 
 /* Cleared by bq7693_comm_clear_error(), latched false by any failed transfer. */
 static volatile bool bq7693_comm_ok = true;
@@ -90,7 +104,6 @@ bool bq7693_init(void)
 {
   uint8_t offset_raw, gain1_raw, gain2_raw, trip, sys_stat;
   bq7693_configured = false;
-  bq7693_cached_cells_valid = false;
   if (!bq7693_i2c_init() || !bq7693_write_register(SYS_CTRL2, 0x00))
     return false;
   if (!bq7693_read_register(ADCOFFSET, 1, &offset_raw) ||
@@ -116,6 +129,11 @@ bool bq7693_init(void)
       !bq7693_read_register(SYS_STAT, 1, &sys_stat) ||
       !bq7693_write_register(SYS_STAT, sys_stat))
     return false;
+  /* Wait for the first conversion: until it lands every VC register reads 0,
+     which comes out as the calibration offset alone (~48mV per cell). Busy
+     wait on SysTick - interrupts (and with them the sw_timer tick) are not on
+     yet, and the watchdog is not started until the main loop. */
+  delay_ms(BQ7693_ADC_SETTLE_MS);
   bq7693_configured = true;
   return true;
 }
@@ -488,19 +506,37 @@ static uint16_t bq7693_vc_to_mv(uint16_t raw)
   return (mv > 0) ? (uint16_t)mv : 0u;
 }
 
+/** @brief true if a stamp is set and younger than limit_ms. */
+static bool bq7693_stamp_younger_than(sw_timer *stamp, uint32_t limit_ms)
+{
+  return sw_timer_is_started(stamp) && (sw_timer_get_elapsed_time(stamp) < limit_ms);
+}
+
 /**
  * @brief Read all 7 cell voltages from BQ7693 and apply ADC calibration.
  *
+ * @param fresh  true: always read the bus. false: return the snapshot
+ *               instead if the last read was complete and is under
+ *               BQ7693_CELL_REUSE_MS old.
  * @return  Pointer to static array of 7 cell voltages in mV.
  */
-uint16_t *bq7693_get_cell_voltages(void)
+const uint16_t *bq7693_get_cell_voltages(bool fresh)
 {
   uint8_t scratch[2];
   uint16_t tempval;
   //Voltages for each cell
   //The cells are connected as below on these packs...
-  int cellsToRead[] = { 0,1,2,3,5,6,9};
+  static const uint8_t cellsToRead[] = { 0,1,2,3,5,6,9};
+
+  if (!fresh && bq7693_stamp_younger_than(&bq7693_cells_time, BQ7693_CELL_REUSE_MS))
+  {
+    return bq7693_cached_cells;
+  }
+
   bool complete = bq7693_configured;
+  bool any_converted = false;
+
+  sw_timer_start(&bq7693_cells_time);
 
   for (int i=0; i< 7; ++i)
   {
@@ -515,23 +551,54 @@ uint16_t *bq7693_get_cell_voltages(void)
       continue;
     }
     tempval = ((scratch[0] & 0x3F) <<8) | scratch[1];
+    any_converted |= (tempval != 0u);
     bq7693_cell_voltages[i] = bq7693_vc_to_mv(tempval);
   }
 
-  if (complete)
+  /* Every channel at raw 0 means the ADC has not converted yet (read too
+     soon after ADC_EN), not seven dead cells. The safety checks still see
+     the offset-only values and reject them; only the cache skips them, so
+     telemetry never reports "48 48 48 ... mV" as a measurement. */
+  if (complete && any_converted)
   {
+    uint16_t pack_mv = 0;   // 7 x ~6.6V (ADC full scale) fits
+
     memcpy(bq7693_cached_cells, bq7693_cell_voltages, sizeof(bq7693_cached_cells));
-    bq7693_cached_cells_valid = true;
+    for (uint8_t i = 0; i < 7u; ++i)
+      pack_mv += bq7693_cell_voltages[i];
+    bq7693_cached_pack_mv = pack_mv;
+  }
+  else
+  {
+    /* +1: sw_timer_get_elapsed_time() subtracts one when the tick is below
+       the stamp (wrap), which a backdated stamp is right after boot */
+    bq7693_cells_time -= (BQ7693_CELL_REUSE_MS + 1u);
   }
   return bq7693_cell_voltages;
 }
 
 /** @brief Last complete cell snapshot without touching I2C or its latch.
- * Call from the main loop, like bq7693_get_cell_voltages(). No age guarantee.
+ * Safe from services context (DSN telemetry). No age guarantee; the main loop
+ * keeps it current with the stale refresh below.
  */
 const uint16_t *bq7693_get_cached_cell_voltages(void)
 {
-  return bq7693_cached_cells_valid ? bq7693_cached_cells : NULL;
+  return (bq7693_cached_pack_mv != 0u) ? bq7693_cached_cells : NULL;
+}
+
+/** @brief Re-read the cells if no read was tried for BQ7693_CELL_MAX_AGE_MS. */
+void bq7693_refresh_cells_if_stale(void)
+{
+  if (!bq7693_stamp_younger_than(&bq7693_cells_time, BQ7693_CELL_MAX_AGE_MS))
+  {
+    (void)bq7693_get_cell_voltages(true);
+  }
+}
+
+/** @brief Make the snapshot count as old; its values stay for telemetry. */
+void bq7693_cells_mark_stale(void)
+{
+  sw_timer_stop(&bq7693_cells_time);
 }
 
 /**
@@ -574,13 +641,7 @@ void bq7693_get_all_vc(uint16_t *voltages_out)
  */
 int bq7693_get_cached_pack_voltage(void)
 {
-  const uint16_t *cells = bq7693_get_cached_cell_voltages();
-  int sum = 0;
-  if (cells == NULL)
-    return -1;
-  for (uint8_t i = 0; i < 7u; ++i)
-    sum += cells[i];
-  return sum;
+  return (bq7693_cached_pack_mv != 0u) ? (int)bq7693_cached_pack_mv : -1;
 }
 
 /**
@@ -716,7 +777,7 @@ bool bq7693_disable_balancing(void)
  */
 bool bq7693_balance_update(bq7693_balance_status_t *status)
 {
-  uint16_t *v;
+  const uint16_t *v;
 
   /*
    * Judge the pack on this tick's own readings. A failed cell read reports
@@ -732,7 +793,7 @@ bool bq7693_balance_update(bq7693_balance_status_t *status)
    * clear it before their own reads anyway.
    */
   bq7693_comm_clear_error();
-  v = bq7693_get_cell_voltages();
+  v = bq7693_get_cell_voltages(true);   // this tick's own read: also the bus check
 
   if (!bq7693_comm_healthy())
   {

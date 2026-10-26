@@ -34,38 +34,104 @@ HEADER = r'''
 '''
 
 CACHE = r'''
-static uint16_t bq7693_cell_voltages[7], bq7693_cached_cells[7];
-static bool bq7693_cached_cells_valid, bq7693_configured = true;
-static int read_count, fail_read = -1;
+typedef uint32_t sw_timer;
+static uint32_t now = 1;          // fake 1ms tick, starts at 1 like the real one
+static void sw_timer_start(sw_timer *t) { *t = now; }
+static void sw_timer_stop(sw_timer *t) { *t = 0; }
+static bool sw_timer_is_started(sw_timer *t) { return *t != 0; }
+static sw_timer sw_timer_get_elapsed_time(sw_timer *t) {  // as sw_timer.c, wrap quirk included
+  if (*t == 0) return 0;
+  uint32_t d = now - *t;
+  if (now < *t) --d;
+  return d;
+}
+#define BQ7693_CELL_REUSE_MS   200u
+#define BQ7693_CELL_MAX_AGE_MS 5000u
+static uint16_t bq7693_cell_voltages[7], bq7693_cached_cells[7], bq7693_cached_pack_mv;
+static bool bq7693_configured = true;
+static sw_timer bq7693_cells_time;
+static int read_count, fail_read = -1, zero_raw;
 #define VC1_HI_BYTE 12
 static bool bq7693_read_register(int addr, size_t len, uint8_t *out) {
   (void)len;
   int n = read_count++;
   if (n == fail_read) return false;
+  if (zero_raw) { out[0] = 0; out[1] = 0; return true; }
   out[0] = 15; out[1] = addr;
   return true;
 }
 static uint16_t bq7693_vc_to_mv(uint16_t raw) { return raw; }
+const uint16_t *bq7693_get_cell_voltages(bool fresh);
+void bq7693_cells_mark_stale(void);
 '''
 CACHE_MAIN = r'''
 int main(void) {
   assert(bq7693_get_cached_cell_voltages() == NULL);
   assert(bq7693_get_cached_pack_voltage() == -1);
-  fail_read = 2;
-  bq7693_get_cell_voltages();
+
+  zero_raw = 1;                 // ADC not converted: all raw 0 is never cached
+  bq7693_get_cell_voltages(true);    // at now=1: the backdated stamp wraps
+  assert(bq7693_get_cached_cell_voltages() == NULL);
+  bq7693_get_cell_voltages(false);   // ...nor reused
+  assert(read_count == 14);
+  zero_raw = 0;
+
+  fail_read = read_count + 2;   // incomplete read is never cached
+  bq7693_get_cell_voltages(true);
   assert(bq7693_get_cached_cell_voltages() == NULL);
   fail_read = -1;
-  bq7693_get_cell_voltages();
+  bq7693_get_cell_voltages(true);
   uint16_t expected[7];
   memcpy(expected, bq7693_get_cached_cell_voltages(), sizeof expected);
   int before = read_count, sum = 0;
   for (int i = 0; i < 7; ++i) sum += expected[i];
   assert(bq7693_get_cached_pack_voltage() == sum);
   assert(read_count == before); // telemetry performs no I2C
+
+  // reuse window: fresh=false skips the bus, fresh=true never does
+  now += BQ7693_CELL_REUSE_MS - 1;
+  const uint16_t *reused = bq7693_get_cell_voltages(false);
+  assert(read_count == before);
+  assert(reused == bq7693_get_cached_cell_voltages());   // the snapshot itself
+  assert(memcmp(expected, reused, sizeof expected) == 0);
+  bq7693_get_cell_voltages(true);
+  assert(read_count == before + 7);
+  now += BQ7693_CELL_REUSE_MS;
+  bq7693_get_cell_voltages(false);
+  assert(read_count == before + 14);
+
+  // failed read: safety sees 0mV, telemetry keeps the last good snapshot,
+  // and the next fresh=false read goes to the bus instead of reusing it
   fail_read = read_count + 3;
-  bq7693_get_cell_voltages();
-  assert(bq7693_cell_voltages[3] == 0); // safety sees failure
+  bq7693_get_cell_voltages(true);
+  assert(bq7693_cell_voltages[3] == 0);
   assert(memcmp(expected, bq7693_get_cached_cell_voltages(), sizeof expected) == 0);
+  fail_read = -1;
+  before = read_count;
+  bq7693_refresh_cells_if_stale();   // the failed read still paces the retry
+  assert(read_count == before);
+  bq7693_get_cell_voltages(false);
+  assert(read_count == before + 7);
+
+  // stale refresh, paced from the last attempt (even a failed one)
+  before = read_count;
+  bq7693_refresh_cells_if_stale();
+  assert(read_count == before);
+  now += BQ7693_CELL_MAX_AGE_MS - 1;
+  bq7693_refresh_cells_if_stale();
+  assert(read_count == before);
+  now += 1;
+  bq7693_refresh_cells_if_stale();
+  assert(read_count == before + 7);
+
+  // after standby the snapshot counts as old for both paths, values kept
+  bq7693_cells_mark_stale();
+  assert(bq7693_get_cached_cell_voltages() != NULL);
+  bq7693_get_cell_voltages(false);
+  assert(read_count == before + 14);
+  bq7693_cells_mark_stale();
+  bq7693_refresh_cells_if_stale();
+  assert(read_count == before + 21);
 }
 '''
 
@@ -193,7 +259,7 @@ static bool sw_timer_is_elapsed(unsigned *t, unsigned timeout) {
   if (!*t || now - *t >= timeout) { *t=0; return true; } return false;
 }
 static void bq7693_comm_clear_error(void) {}
-static uint16_t *bq7693_get_cell_voltages(void) { return voltages; }
+static uint16_t *bq7693_get_cell_voltages(bool fresh) { (void)fresh; return voltages; }
 static bool bq7693_comm_healthy(void) { return healthy; }
 static bool bms_in_storage_mode(void) { return storage; }
 static void port_pin_set_output_level(int pin, bool on) { (void)pin; assert(!on); }
@@ -265,7 +331,7 @@ static uint16_t cells[7];
 static bool healthy=true;
 static void sw_timer_delay_ms(int ms) { assert(ms == 1000); }
 static void bq7693_comm_clear_error(void) {}
-static uint16_t *bq7693_get_cell_voltages(void) { return cells; }
+static uint16_t *bq7693_get_cell_voltages(bool fresh) { (void)fresh; return cells; }
 static bool bq7693_comm_healthy(void) { return healthy; }
 '''
 EMPTY_MAIN = r'''
@@ -340,8 +406,10 @@ int main(void) {
 def main():
     suites = {
         "cache": (CACHE, [function("bq7693.c", name) for name in
-                            ("bq7693_get_cell_voltages", "bq7693_get_cached_cell_voltages",
-                             "bq7693_get_cached_pack_voltage")], CACHE_MAIN),
+                            ("bq7693_stamp_younger_than",
+                             "bq7693_get_cell_voltages", "bq7693_get_cached_cell_voltages",
+                             "bq7693_get_cached_pack_voltage", "bq7693_refresh_cells_if_stale",
+                             "bq7693_cells_mark_stale")], CACHE_MAIN),
         "temperature": (TEMPERATURE, [function("bms.c", "bms_sample_temperatures")], TEMPERATURE_MAIN),
         "soc": (SOC, [function("bms.c", "bms_get_soc_x100")], SOC_MAIN),
         "eeprom": (EEPROM, [function("eeprom_handler.c", name) for name in

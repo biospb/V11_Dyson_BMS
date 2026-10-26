@@ -73,6 +73,28 @@
 #define BQ7693_CC_LSB_MA        8.44f
 #define BQ7693_CC_PERIOD_MS     250.0f
 
+/*
+ * Wait after setting ADC_EN before the VC registers hold a real reading. The
+ * cell ADC updates every 250ms; before the first cycle the registers read 0.
+ * 300ms leaves margin. bq7693_init() waits it out before returning.
+ */
+#define BQ7693_ADC_SETTLE_MS    300u
+
+/*
+ * bq7693_get_cell_voltages(false) returns the snapshot instead of reading the
+ * bus when the last complete read is younger than this. The VC registers only
+ * change once per 250ms conversion, so the reused values are at most one
+ * conversion behind a bus read made at the same moment.
+ */
+#define BQ7693_CELL_REUSE_MS    200u
+
+/*
+ * bq7693_refresh_cells_if_stale() reads the bus when nothing has tried to for
+ * this long. Measured from the last attempt, not the last success, so a dead
+ * bus is retried at this pace, not on every main-loop pass.
+ */
+#define BQ7693_CELL_MAX_AGE_MS  5000u
+
 bool bq7693_init(void);
 bool bq7693_read_register(uint8_t addr, size_t len, uint8_t *buf);
 bool bq7693_write_register(uint8_t addr, uint8_t data);
@@ -85,11 +107,23 @@ bool bq7693_write_register(uint8_t addr, uint8_t data);
 void bq7693_comm_clear_error(void);
 bool bq7693_comm_healthy(void);
 
-uint16_t* bq7693_get_cell_voltages(void);
-/* Main-loop telemetry only: seven values from the last complete read, no I2C.
-   NULL until populated; unchanged on failure, replaced by the next good read.
-   Consume before calling services or making another fresh cell read. */
+/* Main loop only. fresh=true always
+   reads the bus: use it where the read is also the bus check, or where the
+   reading must postdate a change (FETs off, a rest). fresh=false may return
+   the snapshot if the last read was complete and under BQ7693_CELL_REUSE_MS
+   old. */
+const uint16_t *bq7693_get_cell_voltages(bool fresh);
+/* Telemetry, safe from services context: seven values from the last complete
+   read, no I2C. NULL until populated; unchanged on failure, replaced by the
+   next good read. Consume before calling services or making another read. */
 const uint16_t *bq7693_get_cached_cell_voltages(void);
+/* Main loop only: re-read the cells if nothing has tried to for
+   BQ7693_CELL_MAX_AGE_MS. Keeps telemetry current in states with no other
+   cell reads. A failed read latches the comm error, like any other read. */
+void bq7693_refresh_cells_if_stale(void);
+/* Forget the snapshot's age (not its values): the tick counter stops in
+   standby, so after a wake a snapshot from before it would look recent. */
+void bq7693_cells_mark_stale(void);
 extern void bq7693_get_all_vc(uint16_t *voltages_out);  /* 10 entries, VC1..VC10 */
 int bq7693_get_cached_pack_voltage(void);
 /* Return false if the FET could not be driven - see bq7693_enable_charge(). */
