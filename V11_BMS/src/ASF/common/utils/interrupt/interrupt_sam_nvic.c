@@ -44,6 +44,11 @@
 volatile bool g_interrupt_enabled = true;
 #endif
 
+/* Moved here from interrupt_sam_nvic.h, where "static" gave every file that
+   includes the header its own unused copy (39 copies, ~300 bytes of RAM). */
+static volatile uint32_t cpu_irq_critical_section_counter;
+static volatile bool     cpu_irq_prev_interrupt_state;
+
 void cpu_irq_enter_critical(void)
 {
   if (cpu_irq_critical_section_counter == 0) {

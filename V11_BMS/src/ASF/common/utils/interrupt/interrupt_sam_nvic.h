@@ -135,8 +135,6 @@ extern volatile bool g_interrupt_enabled;
 
 #define cpu_irq_is_enabled()    (__get_PRIMASK() == 0)
 
-static volatile uint32_t cpu_irq_critical_section_counter;
-static volatile bool     cpu_irq_prev_interrupt_state;
 
 static inline irqflags_t cpu_irq_save(void)
 {
